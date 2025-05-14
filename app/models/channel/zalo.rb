@@ -3,29 +3,29 @@
 # Table name: channel_zalo
 #
 #  id                 :bigint           not null, primary key
-#  account_id         :integer          not null
-#  zalo_id            :string
-#  phone              :string
-#  display_name       :string
-#  avatar_url         :string
-#  cookie_data        :text
-#  secret_key         :string
-#  imei               :string
 #  access_token_data  :string
-#  refresh_token_data :string
-#  language           :string           default("vi")
 #  api_type           :integer          default(30)
 #  api_version        :integer          default(655)
+#  avatar_url         :string
+#  cookie_data        :text
+#  display_name       :string
+#  imei               :string
+#  language           :string           default("vi")
 #  last_activity_at   :datetime
-#  status             :integer          default(0)
-#  meta               :jsonb            default({})
+#  meta               :jsonb
+#  phone              :string
+#  refresh_token_data :string
+#  secret_key         :string
+#  status             :integer          default("pending_qr_scan")
 #  created_at         :datetime         not null
 #  updated_at         :datetime         not null
+#  account_id         :integer          not null
+#  zalo_id            :string
 #
 # Indexes
 #
-#  index_channel_zalo_on_account_id    (account_id)
-#  index_channel_zalo_on_zalo_id  (zalo_id) UNIQUE
+#  index_channel_zalo_on_account_id  (account_id)
+#  index_channel_zalo_on_zalo_id     (zalo_id) UNIQUE
 #
 class Channel::Zalo < ApplicationRecord
   include Channelable

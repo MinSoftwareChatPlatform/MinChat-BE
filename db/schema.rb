@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.0].define(version: 2025_04_21_085134) do
+ActiveRecord::Schema[7.0].define(version: 2025_05_14_000000) do
   # These extensions should be enabled to support this database
   enable_extension "pg_stat_statements"
   enable_extension "pg_trgm"
@@ -473,6 +473,29 @@ ActiveRecord::Schema[7.0].define(version: 2025_04_21_085134) do
     t.jsonb "message_templates", default: {}
     t.datetime "message_templates_last_updated", precision: nil
     t.index ["phone_number"], name: "index_channel_whatsapp_on_phone_number", unique: true
+  end
+
+  create_table "channel_zalo", force: :cascade do |t|
+    t.integer "account_id", null: false
+    t.string "zalo_id"
+    t.string "phone"
+    t.string "display_name"
+    t.string "avatar_url"
+    t.text "cookie_data"
+    t.string "secret_key"
+    t.string "imei"
+    t.string "access_token_data"
+    t.string "refresh_token_data"
+    t.string "language", default: "vi"
+    t.integer "api_type", default: 30
+    t.integer "api_version", default: 655
+    t.datetime "last_activity_at", precision: nil
+    t.integer "status", default: 0
+    t.jsonb "meta", default: {}
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_channel_zalo_on_account_id"
+    t.index ["zalo_id"], name: "index_channel_zalo_on_zalo_id", unique: true
   end
 
   create_table "contact_inboxes", force: :cascade do |t|

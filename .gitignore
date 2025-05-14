@@ -27,9 +27,6 @@ node_modules
 master.key
 *.rdb
 
-# Ignore env files
-.env
-
 public/uploads
 public/packs*
 public/assets/administrate*
@@ -94,3 +91,11 @@ yarn-debug.log*
 
 # Claude.ai config file
 CLAUDE.md
+
+# Vite Ruby
+/public/vite*
+node_modules
+# Vite uses dotenv and suggests to ignore local-only env files. See
+# https://vitejs.dev/guide/env-and-mode.html#env-files
+*.local
+

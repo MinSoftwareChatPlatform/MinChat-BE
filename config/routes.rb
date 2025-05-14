@@ -277,6 +277,23 @@ Rails.application.routes.draw do
 
           resources :upload, only: [:create]
         end
+
+        resources :inboxes, only: [] do
+          resources :channels, only: [] do
+            collection do
+              post :zalo, to: 'channels/zalo#create'
+            end
+          end
+        end
+
+        namespace :channels do
+          resources :zalo, only: [] do
+            member do
+              post :generate_qr
+              get :check_qr_status
+            end
+          end
+        end
       end
       # end of account scoped api routes
       # ----------------------------------

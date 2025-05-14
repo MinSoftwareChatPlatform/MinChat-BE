@@ -1,7 +1,9 @@
 source 'https://rubygems.org'
 
-ruby '3.3.3'
+ruby '~> 3.3.3'
 
+gem 'httparty'
+gem 'websocket-driver'
 ##-- base gems for rails --##
 gem 'rack-cors', '2.0.0', require: 'rack/cors'
 gem 'rails', '~> 7.0.8.4'
@@ -177,6 +179,13 @@ gem 'iso-639'
 gem 'ruby-openai'
 
 gem 'shopify_api'
+
+# WebSocket client
+gem 'faye-websocket'
+gem 'eventmachine'
+
+# Concurrent Ruby để quản lý các tác vụ đồng thời
+gem 'concurrent-ruby', require: 'concurrent'
 
 ### Gems required only in specific deployment environments ###
 ##############################################################

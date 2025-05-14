@@ -1,0 +1,61 @@
+vi:
+  zalo:
+    notifications:
+      followed: "đã theo dõi bạn trên Zalo"
+      unfollowed: "đã bỏ theo dõi bạn trên Zalo"
+      friend_request: "đã gửi yêu cầu kết bạn trên Zalo"
+      friend_accept: "đã chấp nhận lời mời kết bạn của bạn trên Zalo"
+      friend_reject: "đã từ chối lời mời kết bạn của bạn trên Zalo"
+      friend_action: "đã thực hiện hành động %{action} trên Zalo"
+    qr_code:
+      generating: "Đang tạo mã QR đăng nhập Zalo..."
+      scan_title: "Quét mã QR bằng ứng dụng Zalo"
+      instruction: "Mở ứng dụng Zalo trên điện thoại, chọn \"Cài đặt\" > \"Đăng nhập Zalo Web\" và quét mã QR này"
+      try_again: "Thử lại"
+      refresh: "Làm mới mã QR"
+      status:
+        pending: "Chờ quét mã QR"
+        scanned: "Đã quét mã QR"
+        confirmed: "Đã xác nhận đăng nhập"
+        expired: "Mã QR đã hết hạn"
+    chat:
+      no_messages: "Chưa có tin nhắn. Hãy bắt đầu cuộc trò chuyện."
+      send_message: "Gửi tin nhắn"
+      attachment: "Gửi tệp đính kèm"
+      placeholder: "Nhập tin nhắn..."
+      message_sent: "Đã gửi"
+      message_failed: "Không gửi được tin nhắn"
+      reconnecting: "Đang kết nối lại..."
+      connection_lost: "Mất kết nối với Zalo"
+      connection_restored: "Đã kết nối lại với Zalo"
+      
+en:
+  zalo:
+    notifications:
+      followed: "followed you on Zalo"
+      unfollowed: "unfollowed you on Zalo"
+      friend_request: "sent you a friend request on Zalo"
+      friend_accept: "accepted your friend request on Zalo"
+      friend_reject: "rejected your friend request on Zalo"
+      friend_action: "performed action %{action} on Zalo"
+    qr_code:
+      generating: "Generating Zalo login QR code..."
+      scan_title: "Scan QR code with Zalo app"
+      instruction: "Open Zalo app on your phone, go to \"Settings\" > \"Login to Zalo Web\" and scan this QR code"
+      try_again: "Try again"
+      refresh: "Refresh QR code"
+      status:
+        pending: "Waiting for scan"
+        scanned: "QR code scanned"
+        confirmed: "Login confirmed"
+        expired: "QR code expired"
+    chat:
+      no_messages: "No messages yet. Start a conversation."
+      send_message: "Send message"
+      attachment: "Send attachment"
+      placeholder: "Type a message..."
+      message_sent: "Sent"
+      message_failed: "Failed to send message"
+      reconnecting: "Reconnecting..."
+      connection_lost: "Lost connection to Zalo"
+      connection_restored: "Connection to Zalo restored"

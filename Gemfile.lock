@@ -224,6 +224,7 @@ GEM
     et-orbi (1.2.11)
       tzinfo
     event_stream_parser (1.0.0)
+    eventmachine (1.2.7)
     execjs (2.8.1)
     facebook-messenger (2.0.1)
       httparty (~> 0.13, >= 0.13.7)
@@ -251,6 +252,9 @@ GEM
       net-http-persistent (~> 4.0)
     faraday-retry (2.2.1)
       faraday (~> 2.0)
+    faye-websocket (0.11.3)
+      eventmachine (>= 0.12.0)
+      websocket-driver (>= 0.5.1)
     fcm (1.0.8)
       faraday (>= 1.0.0, < 3.0)
       googleauth (~> 1)
@@ -886,6 +890,7 @@ DEPENDENCIES
   byebug
   climate_control
   commonmarker
+  concurrent-ruby
   csv-safe
   database_cleaner
   ddtrace
@@ -897,9 +902,11 @@ DEPENDENCIES
   down
   elastic-apm
   email_reply_trimmer
+  eventmachine
   facebook-messenger
   factory_bot_rails (>= 6.4.3)
   faker
+  faye-websocket
   fcm
   flag_shih_tzu
   foreman
@@ -914,6 +921,7 @@ DEPENDENCIES
   hairtrigger
   hashie
   html2text
+  httparty
   image_processing
   iso-639
   jbuilder
@@ -993,6 +1001,7 @@ DEPENDENCIES
   web-console (>= 4.2.1)
   web-push (>= 3.0.1)
   webmock
+  websocket-driver
   wisper (= 2.0.0)
   working_hours
 
@@ -1000,4 +1009,4 @@ RUBY VERSION
    ruby 3.3.3p89
 
 BUNDLED WITH
-   2.5.16
+   2.5.11

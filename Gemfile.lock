@@ -236,6 +236,8 @@ GEM
     erubi (1.13.1)
     et-orbi (1.2.11)
       tzinfo
+    ethon (0.16.0)
+      ffi (>= 1.15.0)
     event_stream_parser (1.0.0)
     eventmachine (1.2.7)
     execjs (2.10.0)
@@ -903,6 +905,8 @@ GEM
       nokogiri (>= 1.6, < 2.0)
     twitty (0.1.5)
       oauth
+    typhoeus (1.4.1)
+      ethon (>= 0.9.0)
     tzinfo (2.0.6)
       concurrent-ruby (~> 1.0)
     tzinfo-data (1.2025.2)
@@ -1092,6 +1096,7 @@ DEPENDENCIES
   time_diff
   twilio-ruby (~> 5.66)
   twitty (~> 0.1.5)
+  typhoeus
   tzinfo-data
   uglifier
   valid_email2

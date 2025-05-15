@@ -8,7 +8,7 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
     render json: @zalo_channel
   end
 
-  def create
+  def generate_qr
     account = Account.find_by(id: params[:id])
     Rails.logger.info(account)
     unless account

@@ -5,20 +5,15 @@ Rails.application.routes.draw do
       namespace :accounts do
         resources :zalo, only: [:index, :show, :create, :update, :destroy] do
           collection do
-            post :check_qr_code
-            post :send_message
-            get :websocket_status
-          end
-          
-          member do
-            post :upload_attachment
-            post :send_message 
-            post :check_friend_status
-            post :send_friend_request
-            post :accept_friend_request
+            post 'generate_qr_code', to: 'zalo#generate_qr_code'
+            get 'check_qr_code/:qr_code_id', to: 'zalo#check_qr_code'
+            post 'send_message', to: 'zalo#send_message'
+            post 'upload_attachment', to: 'zalo#upload_attachment'
+            post 'connect_ws', to: 'zalo#connect_ws'
+            get 'websocket', to: 'zalo#websocket'
           end
         end
-        
+
         # Zalo webhook routes
         resources :zalo_webhooks, only: [:create]
       end

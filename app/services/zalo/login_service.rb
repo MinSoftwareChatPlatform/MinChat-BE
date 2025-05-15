@@ -6,6 +6,7 @@ require 'timeout'
 require 'logger'
 require_relative 'zalo_url_manager'
 require_relative 'encryption_service'
+require 'typhoeus'
 
 module Zalo
   module QRCallbackEventType
@@ -21,54 +22,45 @@ module Zalo
     include Zalo::URLManager::Login
     include HTTParty
 
-    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
+    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 
     attr_reader :channel_zalo, :imei, :cookie_jar, :logger
 
     def initialize(channel_zalo_instance = nil)
-      @logger = ::Logger.new(STDOUT) # Explicitly use standard Ruby Logger
+      @logger = ::Logger.new(STDOUT)
       @logger.level = ::Logger::INFO
       @channel_zalo = channel_zalo_instance
       @imei = channel_zalo_instance&.imei || SecureRandom.uuid
-      @cookie_jar = HTTParty::CookieHash.new
-      @encryption_service = Zalo::ZaloCryptoHelper.new(@channel_zalo)
+      @cookies = {}
+      # Fallback cookies
+      @cookies['_zlang'] = 'vn'
+      @cookies['__zi'] = '2000.QOBlzDCV2uGerkFzm09Hqs3Hulp315FNAzBX_uW6LjSgsUlwDpW.1'
       @redis = Redis.new
-      self.class.headers({
-                           'User-Agent' => DEFAULT_USER_AGENT,
-                           'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                           'Accept-Language' => 'vi-VN,vi;q=0.9'
-                         })
-      self.class.follow_redirects(true)
+      @logger.info "[Zalo::LoginService] Initialized cookies: #{cookie_string}"
     end
 
     def generate_qr_code
       @logger.info "[Zalo::LoginService] Generating QR code for IMEI: #{@imei}"
-
       begin
-        # Step 1: Load login page to get version
         version = load_login_page
         return { success: false, error: 'Failed to load login page' } unless version
 
-        # Step 2: Get login info
         get_login_info(version)
-
-        # Step 3: Verify client
         verify_client(version)
-
-        # Step 4: Generate QR code
         qr_data = generate_qr(version)
         return { success: false, error: 'Failed to generate QR code' } unless qr_data
 
         qr_code_id = SecureRandom.uuid
         base64_image = qr_data['image'].sub('data:image/png;base64,', '')
 
-        # Store QR session in Redis
         @redis.setex("zalo_qr_#{qr_code_id}", 300, {
           context: { cookie_jar: @cookie_jar.to_h },
           version: version,
           code: qr_data['code'],
           timestamp: Time.now.to_i
         }.to_json)
+
+        @logger.info "[Zalo::LoginService] Stored QR session in Redis with cookies: #{cookie_string}"
 
         { success: true, qr_code_id: qr_code_id, qr_image_url: "data:image/png;base64,#{base64_image}" }
       rescue => e
@@ -258,39 +250,60 @@ module Zalo
 
     def load_login_page
       begin
-        url = 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
-        response = self.class.get(url)
+        response = make_request(
+          :get,
+          'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
+          headers: {
+            'Connection' => 'keep-alive',
+            'User-Agent' => DEFAULT_USER_AGENT,
+            'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language' => 'vi-VN,vi;q=0.9',
+            'sec-ch-ua' => '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+            'sec-ch-ua-mobile' => '?0',
+            'sec-ch-ua-platform' => '"Windows"'
+          }
+        )
+
+        @logger.info "[Zalo::LoginService] Response code: #{response.code}"
+        @logger.info "[Zalo::LoginService] Response body: #{response.body[0..500]}..."
+        @logger.info "[Zalo::LoginService] Response headers: #{response.headers.inspect}"
 
         if response.code != 200
           @logger.error "[Zalo::LoginService] Failed to load login page: HTTP status #{response.code}"
           return nil
         end
 
-        update_cookie_jar(response.headers['set-cookie'])
+        update_cookies(response.headers['set-cookie'])
         html = response.body
         match = html.match(/https:\/\/stc-zlogin\.zdn\.vn\/main-([\d\.]+)\.js/)
-        match ? match[1] : nil
+        version = match ? match[1] : '5.5.7'
+        @logger.info "[Zalo::LoginService] Extracted version: #{version}"
+        version
       rescue => e
-        @logger.error "[Zalo::LoginService] Error in load_login_page: #{e.message}"
-        return nil
+        @logger.error "[Zalo::LoginService] Error in load_login_page: #{e.message}\n#{e.backtrace.join("\n")}"
+        nil
       end
     end
 
     def get_login_info(version)
       begin
-        url = 'https://id.zalo.me/account/logininfo'
-        form_data = { continue: 'https://zalo.me/pc', v: version }
-        response = self.class.post(url, body: URI.encode_www_form(form_data), headers: {
-          'dnt' => '1', 'origin' => 'https://id.zalo.me', 'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
-        })
+        response = make_request(
+          :post,
+          'https://id.zalo.me/account/logininfo',
+          headers: common_headers,
+          body: URI.encode_www_form({ continue: 'https://zalo.me/pc', v: version })
+        )
+
+        @logger.info "[Zalo::LoginService] Response code: #{response.code}"
+        @logger.info "[Zalo::LoginService] Response body: #{response.body}"
+        @logger.info "[Zalo::LoginService] Response headers: #{response.headers.inspect}"
 
         if response.code != 200
           @logger.error "[Zalo::LoginService] Failed to get login info: HTTP status #{response.code}"
           return nil
         end
 
-        update_cookie_jar(response.headers['set-cookie'])
-
+        update_cookies(response.headers['set-cookie'])
         begin
           result = JSON.parse(response.body)
           return result['error_code'] == 0 ? result : nil
@@ -299,31 +312,30 @@ module Zalo
           return nil
         end
       rescue => e
-        @logger.error "[Zalo::LoginService] Error in get_login_info: #{e.message}"
+        @logger.error "[Zalo::LoginService] Error in get_login_info: #{e.message}\n#{e.backtrace.join("\n")}"
         return nil
       end
     end
 
     def verify_client(version)
       begin
-        url = 'https://id.zalo.me/account/verify-client'
-        form_data = { type: 'device', continue: 'https://zalo.me/pc', v: version }
+        response = make_request(
+          :post,
+          'https://id.zalo.me/account/verify-client',
+          headers: common_headers,
+          body: URI.encode_www_form({ type: 'device', continue: 'https://zalo.me/pc', v: version })
+        )
 
-        headers = {
-          'dnt' => '1',
-          'origin' => 'https://id.zalo.me',
-          'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
-        }
-
-        response = self.class.post(url, body: URI.encode_www_form(form_data), headers: headers)
+        @logger.info "[Zalo::LoginService] Response code: #{response.code}"
+        @logger.info "[Zalo::LoginService] Response body: #{response.body}"
+        @logger.info "[Zalo::LoginService] Response headers: #{response.headers.inspect}"
 
         if response.code != 200
           @logger.error "[Zalo::LoginService] Failed to verify client: HTTP status #{response.code}"
           return nil
         end
 
-        update_cookie_jar(response.headers['set-cookie'])
-
+        update_cookies(response.headers['set-cookie'])
         begin
           result = JSON.parse(response.body)
           return result['error_code'] == 0 ? result : nil
@@ -332,47 +344,64 @@ module Zalo
           return nil
         end
       rescue => e
-        @logger.error "[Zalo::LoginService] Error in verify_client: #{e.message}"
+        @logger.error "[Zalo::LoginService] Error in verify_client: #{e.message}\n#{e.backtrace.join("\n")}"
         return nil
       end
     end
 
     def generate_qr(version)
       begin
-        url = 'https://id.zalo.me/account/authen/qr/generate'
-        form_data = {
-          continue: 'https://zalo.me/pc',
-          v: version
-        }
-        headers = {
-          'dnt' => '1',
-          'origin' => 'https://id.zalo.me',
-          'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
-          'Cookie' => 'zpdid=4H3vbbNtg3iG4f2KKlF0E1uHb9PPySKm; _zlang=vn; _ga=GA1.2.951217436.1747297305; _gid=GA1.2.558268858.1747297305; nl_b04af40bb0e193acf8a9877592394ada=tzaoLC8i6lt9r31Jn2uRzCBGCKRVSNwnazSJ3JenVG; _gat=1; zlogin_session=kW4JGLyjCnIxFnDDLXTbH-Tj1K1K46D5vsqRLmvGRLsiBmjV0b1gNQmk3KCTMcfHVG'
-        }
+        response = make_request(
+          :post,
+          'https://id.zalo.me/account/authen/qr/generate',
+          headers: common_headers,
+          body: URI.encode_www_form({ continue: 'https://chat.zalo.me/', v: version })
+        )
 
-        response = self.class.post(url, body: URI.encode_www_form(form_data), headers: headers)
+        @logger.info "[Zalo::LoginService] Response code: #{response.code}"
+        @logger.info "[Zalo::LoginService] Response body: #{response.body}"
+        @logger.info "[Zalo::LoginService] Response headers: #{response.headers.inspect}"
 
         if response.code != 200
           @logger.error "[Zalo::LoginService] Failed to generate QR: HTTP status #{response.code}"
           return nil
         end
 
-        update_cookie_jar(response.headers['set-cookie'])
-
+        update_cookies(response.headers['set-cookie'])
         begin
           result = JSON.parse(response.body)
+          if result['error_code'] == -1003
+            @logger.warn "[Zalo::LoginService] Session timed out (error -1003)"
+            return nil
+          end
           return result['error_code'] == 0 ? result['data'] : nil
         rescue JSON::ParserError => e
           @logger.error "[Zalo::LoginService] JSON parse error in generate_qr: #{e.message}"
           return nil
         end
       rescue => e
-        @logger.error "[Zalo::LoginService] Error in generate_qr: #{e.message}"
+        @logger.error "[Zalo::LoginService] Error in generate_qr: #{e.message}\n#{e.backtrace.join("\n")}"
         return nil
       end
     end
 
+    def make_request(method, path, headers: {}, body: nil)
+      request = Typhoeus::Request.new(
+        path,
+        method: method,
+        headers: headers.merge('Cookie' => cookie_string),
+        body: body,
+        followlocation: true,
+        cookiefile: ':memory:',
+        cookiejar: ':memory:',
+        timeout: 5
+      )
+
+      response = request.run
+      update_cookies(response.headers['set-cookie'])
+      response
+    end
+    
     def waiting_scan(context, version, code, timeout = 60)
       url = 'https://id.zalo.me/account/authen/qr/waiting-scan'
       form_data = { code: code, continue: 'https://chat.zalo.me/', v: version }
@@ -431,12 +460,8 @@ module Zalo
             return { 'error_code' => -99, 'error_message' => 'Timeout waiting for confirmation' }
           end
 
-          headers = {
-            'dnt' => '1',
-            'origin' => 'https://id.zalo.me',
-            'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
-            'Cookie' => '_zlang=vn; __zi=2000.QOBlzDCV2uGerkFzm09HqsVHvll30r7IAzNZ-eW0KjSeqEFwD3G.1; __zi-legacy=2000.QOBlzDCV2uGerkFzm09HqsVHvll30r7IAzNZ-eW0KjSeqEFwD3G.1; zpdid=4H3vbr3mgJuI7P6HKFp1FH4OafHHzCSp; _ga=GA1.2.1229565104.1747241478; _gid=GA1.2.295553455.1747241478; _gat=1; zlogin_session=kW4JGLyjCnIxFnDDLXTbH-Tj1K1L5614xMWOLWHLRbocAWXU25LfNAOh3a8NNsbGVG'
-          }
+          headers = common_headers
+          headers['Cookie'] = cookie_string
 
           response = self.class.post(url, body: URI.encode_www_form(form_data), headers: headers)
 
@@ -467,9 +492,10 @@ module Zalo
     def check_session(context)
       begin
         url = 'https://id.zalo.me/account/checksession?continue=https%3A%2F%2Fchat.zalo.me%2Findex.html'
-        response = self.class.get(url, headers: {
-          'dnt' => '1', 'origin' => 'https://id.zalo.me', 'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
-        })
+        headers = common_headers
+        headers['Cookie'] = cookie_string
+
+        response = self.class.get(url, headers: headers)
 
         update_cookie_jar(response.headers['set-cookie'])
 
@@ -488,9 +514,10 @@ module Zalo
     def get_user_info(context)
       begin
         url = 'https://jr.chat.zalo.me/jr/userinfo'
-        response = self.class.get(url, headers: {
-          'dnt' => '1', 'origin' => 'https://id.zalo.me', 'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
-        })
+        headers = common_headers
+        headers['Cookie'] = cookie_string
+
+        response = self.class.get(url, headers: headers)
 
         update_cookie_jar(response.headers['set-cookie'])
 
@@ -513,16 +540,33 @@ module Zalo
 
     def update_cookie_jar(set_cookie_header)
       return unless set_cookie_header
-      Array(set_cookie_header).each { |cookie_str| @cookie_jar.add_cookies(cookie_str) }
+      Array(set_cookie_header).each do |cookie_str|
+        @cookie_jar.add_cookies(cookie_str)
+        @logger.info "[Zalo::LoginService] Added cookie: #{cookie_str}"
+      end
+      @logger.info "[Zalo::LoginService] Current cookie jar: #{cookie_string}"
     end
 
     def restore_cookie_jar(cookie_hash)
       @cookie_jar = HTTParty::CookieHash.new
       cookie_hash.each { |key, value| @cookie_jar[key] = value }
+      @logger.info "[Zalo::LoginService] Restored cookie jar: #{cookie_string}"
     end
 
     def cookie_string
-      @cookie_jar.to_cookie_string
+      cookies = @cookie_jar.to_cookie_string
+      @logger.info "[Zalo::LoginService] Cookie string: #{cookies}"
+      cookies
+    end
+
+    def validate_cookies
+      required_cookies = ['_zlang', '__zi', 'zpdid', 'zlogin_session']
+      missing_cookies = required_cookies.reject { |key| @cookie_jar[key] }
+      if missing_cookies.any?
+        @logger.warn "[Zalo::LoginService] Missing required cookies: #{missing_cookies.join(', ')}"
+        return false
+      end
+      true
     end
 
     def handle_scan_error(result, qr_code_id)
@@ -539,6 +583,26 @@ module Zalo
         @redis.del("zalo_qr_#{qr_code_id}")
         { success: false, error: "Unknown error: #{result['error_code']}", event_type: QRCallbackEventType::QR_CODE_EXPIRED }
       end
+    end
+
+    def common_headers
+      {
+        'accept' => '*/*',
+        'accept-language' => 'vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5',
+        'content-type' => 'application/x-www-form-urlencoded',
+        'dnt' => '1',
+        'origin' => 'https://id.zalo.me',
+        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
+        'sec-ch-ua' => '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        'sec-ch-ua-mobile' => '?0',
+        'sec-ch-ua-platform' => '"Windows"',
+        'sec-fetch-dest' => 'empty',
+        'sec-fetch-mode' => 'cors',
+        'sec-fetch-site' => 'same-origin',
+        'user-agent' => DEFAULT_USER_AGENT,
+        'Connection' => 'keep-alive',
+        'priority' => 'u=1, i'
+      }
     end
 
     def handle_confirm_error(result, qr_code_id)
@@ -575,6 +639,20 @@ module Zalo
       { success: false, error: message, event_type: event_type }
     end
 
+    def update_cookies(set_cookie)
+      return unless set_cookie
+      Array(set_cookie).each do |cookie|
+        name, value = cookie.split(';').first.split('=')
+        @cookies[name] = value
+        @logger.info "[Zalo::LoginService] Added cookie: #{name}=#{value}"
+      end
+    end
+
+    def cookie_string
+      cookies = @cookies.map { |k, v| "#{k}=#{v}" }.join('; ')
+      @logger.info "[Zalo::LoginService] Cookie string: #{cookies}"
+      cookies
+    end
     def with_timeout(timeout_seconds, &block)
       result = nil
       begin

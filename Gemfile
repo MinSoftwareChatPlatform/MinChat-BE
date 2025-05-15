@@ -46,6 +46,14 @@ gem 'net-smtp',  '~> 0.3.4'
 # Prevent CSV injection
 gem 'csv-safe'
 
+gem 'http', '~> 5.2'
+gem 'http-cookie', '~> 1.0'
+gem 'redis', '~> 5.3'
+
+gem 'faraday'
+gem 'faraday-cookie_jar'
+gem 'faraday-net_http_persistent'
+
 ##-- for active storage --##
 gem 'aws-sdk-s3', require: false
 # original gem isn't maintained actively
@@ -57,7 +65,6 @@ gem 'image_processing'
 ##-- gems for database --#
 gem 'groupdate'
 gem 'pg'
-gem 'redis'
 gem 'redis-namespace'
 # super fast record imports in bulk
 gem 'activerecord-import'

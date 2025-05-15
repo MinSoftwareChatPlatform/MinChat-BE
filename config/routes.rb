@@ -286,13 +286,9 @@ Rails.application.routes.draw do
           end
         end
 
-        namespace :channels do
-          resources :zalo, only: [] do
-            member do
-              post :generate_qr
-              get :check_qr_status
-            end
-          end
+        member do
+          post 'zalo/generate_qr', to: 'accounts/zalo/zalo#create'
+          get 'zalo/check_qr_status', to: 'accounts/zalo/zalo#check_qr_status'
         end
       end
       # end of account scoped api routes

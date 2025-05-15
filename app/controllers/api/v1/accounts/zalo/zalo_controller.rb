@@ -1,7 +1,4 @@
-class Api::V1::Accounts::ZaloController < Api::V1::Accounts::BaseController
-  before_action :check_authorization
-  before_action :fetch_channel, only: [:show, :update, :destroy]
-
+class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseController
   def index
     @zalo_channels = Current.account.zalo
     render json: @zalo_channels
@@ -12,33 +9,33 @@ class Api::V1::Accounts::ZaloController < Api::V1::Accounts::BaseController
   end
 
   def create
+    account = Account.find_by(id: params[:id])
+    Rails.logger.info(account)
+    unless account
+      render json: { error: 'Account not found' }, status: :not_found and return
+    end
+
+    Current.account = account
+
     ActiveRecord::Base.transaction do
-      # Tạo Inbox cho Zalo
-      @inbox = Current.account.inboxes.build(
-        name: params[:name] || 'Zalo',
-        channel_type: 'Channel::Zalo'
-      )
-
-      # Lưu Inbox
-      @inbox.save!
-
-      # Tạo Channel::Zalo
-      @zalo_channel = Channel::Zalo.new(
+      @zalo_channel = Channel::Zalo.create!(
         account_id: Current.account.id,
-        imei: "chatwoot_#{SecureRandom.uuid}",
+        imei: SecureRandom.uuid,
         status: :pending_qr_scan,
         api_type: params[:api_type] || 30,
         api_version: params[:api_version] || 655,
         language: params[:language] || 'vi'
       )
 
-      # Liên kết Inbox với Channel
-      @inbox.channel = @zalo_channel
-      @zalo_channel.save!
+      @inbox = Current.account.inboxes.create!(
+        name: params[:name] || 'Zalo',
+        channel_type: 'Channel::Zalo',
+        channel: @zalo_channel
+      )
 
-      # Khởi tạo QR code
       login_service = Zalo::LoginService.new(@zalo_channel)
       qr_result = login_service.generate_qr_code
+      Rails.logger.debug(qr_result)
 
       if qr_result[:success]
         render json: {

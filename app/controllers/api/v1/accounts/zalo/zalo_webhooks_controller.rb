@@ -1,4 +1,4 @@
-class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseController
+class Api::V1::Accounts::Zalo::ZaloWebhooksController < Api::V1::Accounts::BaseController
   skip_before_action :authenticate_user_from_token!, only: [:create]
   skip_before_action :check_authorization, only: [:create]
   before_action :validate_zalo_webhook_signature, only: [:create]
@@ -48,7 +48,7 @@ class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseControl
     # Process incoming message
     message_data = params[:message] || {}
     sender_id = message_data[:sender_id] || params[:sender_id]
-    
+
     return if sender_id.blank?
 
     # Find or create contact
@@ -56,7 +56,7 @@ class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseControl
       name: message_data[:sender_name] || params[:sender_name],
       avatar_url: message_data[:sender_avatar] || params[:sender_avatar]
     }
-    
+
     contact_inbox = @zalo_channel.create_contact_inbox(sender_id, sender_profile)
     conversation = contact_inbox.find_or_create_conversation
 
@@ -86,7 +86,7 @@ class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseControl
       name: params[:follower][:display_name],
       avatar_url: params[:follower][:avatar]
     }
-    
+
     contact_inbox = @zalo_channel.create_contact_inbox(sender_id, sender_profile)
     conversation = contact_inbox.find_or_create_conversation
 
@@ -126,7 +126,7 @@ class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseControl
       when 'image'
         attachment_url = attachment[:payload][:url]
         attachment_file = Down.download(attachment_url)
-        
+
         conversation.messages.create!(
           content: attachment[:payload][:caption],
           account_id: @zalo_channel.account_id,
@@ -143,7 +143,7 @@ class Api::V1::Accounts::ZaloWebhooksController < Api::V1::Accounts::BaseControl
       when 'file'
         attachment_url = attachment[:payload][:url]
         attachment_file = Down.download(attachment_url)
-        
+
         conversation.messages.create!(
           content: attachment[:payload][:caption] || attachment[:payload][:name],
           account_id: @zalo_channel.account_id,

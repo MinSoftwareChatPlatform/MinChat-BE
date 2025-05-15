@@ -10,35 +10,45 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
 
   def generate_qr
     account = Account.find_by(id: params[:id])
+    Rails.logger.info(account)
     unless account
       render json: { error: 'Account not found' }, status: :not_found and return
     end
 
     Current.account = account
 
-    # Initialize login service without a channel
-    login_service = Zalo::LoginService.new
-    qr_result = login_service.generate_qr_code
-
-    if qr_result[:success]
-      # Store temporary data in Redis using login_service's Redis instance
-      temp_data = {
-        account_id: account.id,
-        name: params[:name] || 'Zalo',
+    ActiveRecord::Base.transaction do
+      @zalo_channel = Channel::Zalo.create!(
+        account_id: Current.account.id,
+        imei: SecureRandom.uuid,
+        status: :pending_qr_scan,
         api_type: params[:api_type] || 30,
         api_version: params[:api_version] || 655,
-        language: params[:language] || 'vi',
-        qr_code_id: qr_result[:qr_code_id]
-      }
-      login_service.redis.setex("zalo_temp_#{qr_result[:qr_code_id]}", 300, temp_data.to_json)
+        language: params[:language] || 'vi'
+      )
 
-      render json: {
-        qr_code_id: qr_result[:qr_code_id],
-        qr_image_url: qr_result[:qr_image_url],
-        status: 'pending_qr_scan'
-      }, status: :created
-    else
-      render json: { error: qr_result[:error] }, status: :unprocessable_entity
+      @inbox = Current.account.inboxes.create!(
+        name: params[:name] || 'Zalo',
+        channel_type: 'Channel::Zalo',
+        channel: @zalo_channel
+      )
+
+      login_service = Zalo::LoginService.new(@zalo_channel)
+      qr_result = login_service.generate_qr_code
+      Rails.logger.debug(qr_result)
+
+      if qr_result[:success]
+        render json: {
+          id: @zalo_channel.id,
+          inbox_id: @inbox.id,
+          qr_code_id: qr_result[:qr_code_id],
+          qr_image_url: qr_result[:qr_image_url],
+          status: @zalo_channel.status
+        }, status: :created
+      else
+        raise ActiveRecord::Rollback
+        render json: { error: qr_result[:error] }, status: :unprocessable_entity
+      end
     end
   rescue StandardError => e
     render json: { error: e.message }, status: :unprocessable_entity
@@ -63,63 +73,35 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
     qr_code_id = params[:qr_code_id]
     render json: { error: 'QR code ID is required' }, status: :bad_request and return unless qr_code_id.present?
 
-    # Initialize login service to access Redis
     login_service = Zalo::LoginService.new
+    result = login_service.check_qr_code_scan(qr_code_id, Current.user.id)
 
-    # Retrieve temporary data
-    temp_data_json = login_service.redis.get("zalo_temp_#{qr_code_id}")
-    unless temp_data_json
-      render json: { error: 'QR session not found or expired' }, status: :unprocessable_entity and return
-    end
-    temp_data = JSON.parse(temp_data_json)
+    if result[:success]
+      # Nếu đăng nhập thành công, cập nhật channel
+      if result[:account_data].present?
+        zalo_channel = Channel::Zalo.find_by(id: params[:channel_id])
 
-    result = login_service.check_qr_code_scan(qr_code_id)
+        if zalo_channel
+          zalo_channel.update(
+            zalo_id: result[:account_data][:uid],
+            display_name: result[:account_data][:display_name],
+            phone: result[:account_data][:phone],
+            avatar_url: result[:account_data][:avatar_url],
+            cookie_data: result[:account_data][:cookie],
+            secret_key: result[:account_data][:secret_key],
+            status: :enabled,
+            last_activity_at: Time.current
+          )
 
-    if result[:success] && result[:event_type] == Zalo::QRCallbackEventType::GOT_LOGIN_INFO
-      ActiveRecord::Base.transaction do
-        # Create the Zalo channel
-        zalo_channel = Channel::Zalo.create!(
-          account_id: temp_data['account_id'],
-          imei: login_service.imei,
-          zalo_id: result[:user_info][:account_id], # Assuming account_id is included
-          display_name: result[:user_info][:name],
-          phone: result[:user_info][:phone],
-          avatar_url: result[:user_info][:avatar],
-          cookie_data: login_service.cookie_string,
-          secret_key: result[:user_info][:secret_key], # Assuming secret_key is included
-          status: :enabled,
-          api_type: temp_data['api_type'],
-          api_version: temp_data['api_version'],
-          language: temp_data['language'],
-          last_activity_at: Time.current
-        )
-
-        # Create the inbox
-        inbox = Current.account.inboxes.create!(
-          name: temp_data['name'],
-          channel_type: 'Channel::Zalo',
-          channel: zalo_channel
-        )
-
-        # Start WebSocket listener
-        Zalo::WebsocketManagerService.instance.start_listener_for(zalo_channel)
-
-        # Clean up temporary data
-        login_service.redis.del("zalo_temp_#{qr_code_id}")
-
-        render json: {
-          success: true,
-          id: zalo_channel.id,
-          inbox_id: inbox.id,
-          user_info: result[:user_info],
-          status: zalo_channel.status
-        }
+          # Khởi tạo WebSocket
+          Zalo::WebsocketManagerService.instance.start_listener_for(zalo_channel)
+        end
       end
+
+      render json: result
     else
       render json: result, status: :unprocessable_entity
     end
-  rescue StandardError => e
-    render json: { error: e.message }, status: :unprocessable_entity
   end
 
   def send_message

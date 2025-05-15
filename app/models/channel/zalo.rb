@@ -44,7 +44,7 @@ class Channel::Zalo < ApplicationRecord
   belongs_to :account
 
   # Thiết lập thời gian hết hạn cho QR Code
-  QR_CODE_EXPIRY = 60.seconds
+  QR_CODE_EXPIRY = 5.minutes
 
   # Kiểm tra xem kênh Zalo có hoạt động hay không
   def online?

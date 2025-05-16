@@ -42,53 +42,53 @@ class Channel::Zalo < ApplicationRecord
 
   # Thiết lập mối quan hệ với Account
   belongs_to :account
-  
+
   # Thiết lập thời gian hết hạn cho QR Code
-  QR_CODE_EXPIRY = 5.minutes
-  
+  QR_CODE_EXPIRY = 60.seconds
+
   # Kiểm tra xem kênh Zalo có hoạt động hay không
   def online?
     enabled? && last_activity_at.present? && last_activity_at > 15.minutes.ago
   end
-  
+
   # Cập nhật thời gian hoạt động cuối cùng
   def update_last_activity
     update(last_activity_at: Time.current)
   end
-  
+
   # Khởi tạo WebSocket nếu cần
   def ensure_websocket_connected
     return if disabled?
-    
+
     # Khởi tạo WebSocket connection nếu chưa tồn tại
     Zalo::WebsocketManagerService.instance.start_listener_for(self)
   end
-  
+
   # Gửi tin nhắn văn bản
   def send_text_message(recipient_id, message_content)
     client_service = Zalo::ClientService.new(self)
     client_service.send_text_message(recipient_id, message_content)
   end
-  
+
   # Lấy secret key được giải mã
   def decoded_secret_key
     return nil if secret_key.blank?
-    
+
     # Trong trường hợp thực tế, bạn có thể cần mã hóa/giải mã secret key
     secret_key
   end
-  
+
   # Callback sau khi tạo kênh
   after_create :setup_webhook
   after_update :setup_webhook, if: :saved_change_to_status?
-  
+
   # Callback để bắt đầu/dừng listener WebSocket khi kênh được kích hoạt/vô hiệu hóa hoặc xóa
-  after_commit :start_realtime_listener, on: [:create, :update], 
+  after_commit :start_realtime_listener, on: [:create, :update],
                if: -> { saved_change_to_status? && enabled? }
-  
+
   after_commit :stop_realtime_listener, on: [:update],
                if: -> { saved_change_to_status? && (disabled? || authorization_error?) }
-  
+
   before_destroy :stop_realtime_listener
 
   def name
@@ -110,12 +110,11 @@ class Channel::Zalo < ApplicationRecord
       }
     ).perform
   end
-
   # Phương thức để bắt đầu quá trình đăng nhập QR
   def initiate_qr_login
     service = Zalo::LoginService.new(self)
     result = service.generate_qr_code
-    
+
     if result[:success]
       update(meta: meta.merge(qr_code_id: result[:qr_code_id], qr_status: 'pending_scan'))
       { success: true, qr_code_id: result[:qr_code_id], qr_image_url: result[:qr_image_url] }
@@ -128,7 +127,7 @@ class Channel::Zalo < ApplicationRecord
   def check_qr_login_status(qr_code_id)
     service = Zalo::LoginService.new(self)
     result = service.poll_qr_status(qr_code_id)
-    
+
     if result[:status] == :success
       # Thông tin xác thực đã được service cung cấp, cần cập nhật model
       # Nhưng không lưu ở đây, controller sẽ làm việc đó
@@ -146,7 +145,7 @@ class Channel::Zalo < ApplicationRecord
         meta: meta.except('qr_code_id', 'qr_status', 'error_message')
       )
     end
-    
+
     result
   end
 
@@ -197,7 +196,7 @@ class Channel::Zalo < ApplicationRecord
 
   def setup_webhook
     return unless enabled?
-    
+
     # Đảm bảo webhook và websocket được thiết lập
     ensure_websocket_connected
   end
@@ -219,4 +218,4 @@ class Channel::Zalo < ApplicationRecord
   def ensure_imei
     self.imei ||= "chatwoot_#{SecureRandom.uuid}"
   end
-end
+  end

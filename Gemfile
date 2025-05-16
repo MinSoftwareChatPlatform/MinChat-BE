@@ -46,6 +46,9 @@ gem 'net-smtp',  '~> 0.3.4'
 # Prevent CSV injection
 gem 'csv-safe'
 
+gem 'http', '~> 5.2'
+gem 'http-cookie', '~> 1.0'
+
 ##-- for active storage --##
 gem 'aws-sdk-s3', require: false
 # original gem isn't maintained actively

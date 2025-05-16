@@ -259,8 +259,8 @@ GEM
       faraday (>= 1.0.0, < 3.0)
       googleauth (~> 1)
     ffi (1.16.3)
-    ffi-compiler (1.0.1)
-      ffi (>= 1.0.0)
+    ffi-compiler (1.3.2)
+      ffi (>= 1.15.5)
       rake
     flag_shih_tzu (0.3.23)
     foreman (0.87.2)
@@ -361,11 +361,12 @@ GEM
     hashie (5.0.0)
     html2text (0.4.0)
       nokogiri (>= 1.0, < 2.0)
-    http (5.1.1)
+    http (5.2.0)
       addressable (~> 2.8)
+      base64 (~> 0.1)
       http-cookie (~> 1.0)
       http-form_data (~> 2.2)
-      llhttp-ffi (~> 0.4.0)
+      llhttp-ffi (~> 0.5.0)
     http-accept (1.7.0)
     http-cookie (1.0.5)
       domain_name (~> 0.5)
@@ -446,7 +447,7 @@ GEM
     listen (3.8.0)
       rb-fsevent (~> 0.10, >= 0.10.3)
       rb-inotify (~> 0.9, >= 0.9.10)
-    llhttp-ffi (0.4.0)
+    llhttp-ffi (0.5.1)
       ffi-compiler (~> 1.0)
       rake (~> 13.0)
     logger (1.6.0)
@@ -921,6 +922,8 @@ DEPENDENCIES
   hairtrigger
   hashie
   html2text
+  http (~> 5.2)
+  http-cookie (~> 1.0)
   httparty
   image_processing
   iso-639

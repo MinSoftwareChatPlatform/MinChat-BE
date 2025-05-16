@@ -42,6 +42,8 @@ Rails.application.routes.draw do
         member do
           post :update_active_at
           get :cache_keys
+          post 'zalo/generate_qr', to: 'accounts/zalo/zalo#generate_qr'
+          get 'zalo/check_qr_code/:qr_code_id', to: 'accounts/zalo/zalo#check_qr_code', as: 'zalo_check_qr_code'
         end
 
         scope module: :accounts do
@@ -286,15 +288,6 @@ Rails.application.routes.draw do
             end
           end
         end
-
-        namespace :channels do
-          resources :zalo, only: [] do
-            member do
-              post :generate_qr
-              get :check_qr_status
-            end
-          end
-        end
       end
       # end of account scoped api routes
       # ----------------------------------
@@ -328,7 +321,7 @@ Rails.application.routes.draw do
             post :update_last_seen
             post :toggle_typing
             post :transcript
-            get  :toggle_status
+            get :toggle_status
           end
         end
         resource :contact, only: [:show, :update] do
@@ -561,7 +554,7 @@ Rails.application.routes.draw do
   get '/swagger/*path', to: 'swagger#respond'
   get '/swagger', to: 'swagger#respond'
 
-  # ----------------------------------------------------------------------
+  # ---------------------------------------------------------------- حسن
   # Routes for testing
   resources :widget_tests, only: [:index] unless Rails.env.production?
 end

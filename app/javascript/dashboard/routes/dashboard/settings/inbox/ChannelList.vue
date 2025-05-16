@@ -35,6 +35,7 @@ export default {
         },
         { key: 'telegram', name: 'Telegram' },
         { key: 'line', name: 'Line' },
+        { key: 'zalo', name: 'Zalo' },
         { key: 'instagram', name: 'Instagram' },
       ];
     },

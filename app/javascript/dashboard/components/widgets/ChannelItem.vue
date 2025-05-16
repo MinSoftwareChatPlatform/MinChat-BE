@@ -28,6 +28,9 @@ export default {
       if (key === 'website') {
         return this.enabledFeatures.channel_website;
       }
+      if (key === 'zalo') {
+        return true;
+      }
       if (key === 'facebook') {
         return this.enabledFeatures.channel_facebook && this.hasFbConfigured;
       }
@@ -50,6 +53,7 @@ export default {
         'telegram',
         'line',
         'instagram',
+        'zalo',
       ].includes(key);
     },
   },

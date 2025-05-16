@@ -36,14 +36,13 @@ Rails.application.routes.draw do
   get '/api', to: 'api#index'
   namespace :api, defaults: { format: 'json' } do
     namespace :v1 do
-      # ----------------------------------
-      # start of account scoped api routes
       resources :accounts, only: [:create, :show, :update] do
         member do
           post :update_active_at
           get :cache_keys
-          post 'zalo/generate_qr', to: 'accounts/zalo/zalo#generate_qr'
-          get 'zalo/check_qr_code/:qr_code_id', to: 'accounts/zalo/zalo#check_qr_code', as: 'zalo_check_qr_code'
+          # Zalo routes
+          post 'zalo/generate_qr', to: 'accounts/zalo/zalo#generate_qr', as: 'zalo_generate_qr', defaults: { format: nil }
+          get 'zalo/check_qr_code/:qr_code_id', to: 'accounts/zalo/zalo#check_qr_code', as: 'zalo_check_qr_code', defaults: { format: nil }
         end
 
         scope module: :accounts do

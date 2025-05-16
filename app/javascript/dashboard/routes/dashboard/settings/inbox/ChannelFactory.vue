@@ -10,6 +10,7 @@ import Whatsapp from './channels/Whatsapp.vue';
 import Line from './channels/Line.vue';
 import Telegram from './channels/Telegram.vue';
 import Instagram from './channels/Instagram.vue';
+import Zalo from './channels/Zalo.vue';
 
 const channelViewList = {
   facebook: Facebook,
@@ -22,6 +23,7 @@ const channelViewList = {
   line: Line,
   telegram: Telegram,
   instagram: Instagram,
+  zalo: Zalo,
 };
 
 export default defineComponent({

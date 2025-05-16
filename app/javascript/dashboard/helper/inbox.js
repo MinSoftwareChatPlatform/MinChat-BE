@@ -10,6 +10,7 @@ export const INBOX_TYPES = {
   LINE: 'Channel::Line',
   SMS: 'Channel::Sms',
   INSTAGRAM: 'Channel::Instagram',
+  ZALO: 'Channel::Zalo',
 };
 
 const INBOX_ICON_MAP_FILL = {
@@ -22,6 +23,7 @@ const INBOX_ICON_MAP_FILL = {
   [INBOX_TYPES.TELEGRAM]: 'i-ri-telegram-fill',
   [INBOX_TYPES.LINE]: 'i-ri-line-fill',
   [INBOX_TYPES.INSTAGRAM]: 'i-ri-instagram-fill',
+  [INBOX_TYPES.ZALO]: 'i-ri-chat-1-fill',
 };
 
 const DEFAULT_ICON_FILL = 'i-ri-chat-1-fill';
@@ -36,6 +38,7 @@ const INBOX_ICON_MAP_LINE = {
   [INBOX_TYPES.TELEGRAM]: 'i-ri-telegram-line',
   [INBOX_TYPES.LINE]: 'i-ri-line-line',
   [INBOX_TYPES.INSTAGRAM]: 'i-ri-instagram-line',
+  [INBOX_TYPES.ZALO]: 'i-ri-zalo-fill',
 };
 
 const DEFAULT_ICON_LINE = 'i-ri-chat-1-line';

@@ -123,7 +123,6 @@ export default {
     isCurrentRoute() {
       return this.$store.state.route.name.includes(this.menuItem.toStateName);
     },
-
     computedClass() {
       // If active inbox is present, do not highlight conversations
       if (this.activeInbox) return ' ';
@@ -149,6 +148,51 @@ export default {
       }
 
       return 'hover:text-slate-700 dark:hover:text-slate-100';
+    },
+    // Thêm computed property để nhóm các channel theo loại
+    channelGroups() {
+      if (!this.menuItem.children) return {};
+
+      // Nhóm các channel theo type
+      const groups = this.menuItem.children.reduce((acc, child) => {
+        // Lấy tên channel từ type (ví dụ: 'Channel::Zalo' -> 'Zalo')
+        const channelType = child.type || '';
+        const channelName = channelType.split('::')[1] || 'Other';
+
+        if (!acc[channelName]) {
+          acc[channelName] = [];
+        }
+
+        acc[channelName].push(child);
+        return acc;
+      }, {});
+
+      return groups;
+    },
+    // Lấy danh sách các loại channel để hiển thị
+    channelTypes() {
+      const types = Object.keys(this.channelGroups);
+      // Sắp xếp các loại channel theo thứ tự ưu tiên
+      const orderPriority = {
+        WebWidget: 1,
+        Zalo: 2,
+        // Thêm các loại khác nếu cần
+      };
+
+      return types.sort((a, b) => {
+        const priorityA = orderPriority[a] || 999;
+        const priorityB = orderPriority[b] || 999;
+        return priorityA - priorityB;
+      });
+    },
+    // Map tên hiển thị đẹp hơn cho các loại channel
+    channelDisplayNames() {
+      return {
+        WebWidget: 'Web Widget',
+        Zalo: 'Zalo',
+        Email: 'Email',
+        // Thêm các loại channel khác nếu cần
+      };
     },
   },
   methods: {
@@ -186,12 +230,20 @@ export default {
     showChildCount(count) {
       return Number.isInteger(count);
     },
+    // Phương thức để lấy tên hiển thị cho loại channel
+    getChannelDisplayName(channelType) {
+      return this.channelDisplayNames[channelType] || channelType;
+    },
   },
 };
 </script>
 
 <template>
-  <li v-show="isMenuItemVisible" class="mt-1">
+  <li
+    v-show="isMenuItemVisible"
+    class="mt-1"
+    @click="() => console.log('menuItem:', menuItem)"
+  >
     <div v-if="hasSubMenu" class="flex justify-between">
       <span
         class="px-2 pt-1 my-2 text-sm font-semibold text-slate-700 dark:text-slate-200"
@@ -238,18 +290,50 @@ export default {
     </router-link>
 
     <ul v-if="hasSubMenu" class="list-none reset-base">
-      <SecondaryChildNavItem
-        v-for="child in menuItem.children"
-        :key="child.id"
-        :to="child.toState"
-        :label="child.label"
-        :label-color="child.color"
-        :should-truncate="child.truncateLabel"
-        :icon="computedInboxClass(child)"
-        :warning-icon="computedInboxErrorClass(child)"
-        :show-child-count="showChildCount(child.count)"
-        :child-item-count="child.count"
-      />
+      <!-- Phân loại theo channel type cho menu INBOXES -->
+      <template v-if="menuItem.label === 'INBOXES'">
+        <!-- Lặp qua từng loại channel -->
+        <li v-for="channelType in channelTypes" :key="channelType" class="mt-2">
+          <div
+            class="px-2 text-sm font-medium text-slate-600 dark:text-slate-300 flex item-center"
+          >
+            <span class="text-white text-md">{{
+              getChannelDisplayName(channelType)
+            }}</span>
+          </div>
+          <ul class="list-none reset-base max-h-[15rem] overflow-auto">
+            <SecondaryChildNavItem
+              v-for="child in channelGroups[channelType]"
+              :key="child.id"
+              :to="child.toState"
+              :label="child.label"
+              :label-color="child.color"
+              :should-truncate="child.truncateLabel"
+              :icon="computedInboxClass(child)"
+              :warning-icon="computedInboxErrorClass(child)"
+              :show-child-count="showChildCount(child.count)"
+              :child-item-count="child.count"
+            />
+          </ul>
+        </li>
+      </template>
+
+      <!-- Hiển thị bình thường cho các menu khác không phải INBOXES -->
+      <template v-else>
+        <SecondaryChildNavItem
+          v-for="child in menuItem.children"
+          :key="child.id"
+          :to="child.toState"
+          :label="child.label"
+          :label-color="child.color"
+          :should-truncate="child.truncateLabel"
+          :icon="computedInboxClass(child)"
+          :warning-icon="computedInboxErrorClass(child)"
+          :show-child-count="showChildCount(child.count)"
+          :child-item-count="child.count"
+        />
+      </template>
+
       <Policy :permissions="['administrator']">
         <router-link
           v-if="menuItem.newLink"

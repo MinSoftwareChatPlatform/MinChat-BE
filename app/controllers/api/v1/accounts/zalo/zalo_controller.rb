@@ -1,9 +1,4 @@
 class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseController
-  def index
-    @zalo_channels = Current.account.zalo
-    render json: @zalo_channels
-  end
-
   def show
     render json: @zalo_channel
   end
@@ -34,7 +29,7 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
 
       render json: {
         qr_code_id: qr_result[:qr_code_id],
-        qr_image_url: qr_result[:qr_image_url],
+        qr_image_url: qr_result[:base64_image],
         status: 'pending_qr_scan'
       }, status: :created
     else
@@ -42,14 +37,6 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
     end
   rescue StandardError => e
     render json: { error: e.message }, status: :unprocessable_entity
-  end
-
-  def update
-    if @zalo_channel.update(zalo_channel_params)
-      render json: @zalo_channel
-    else
-      render json: { error: @zalo_channel.errors.full_messages.join(', ') }, status: :unprocessable_entity
-    end
   end
 
   def destroy
@@ -75,7 +62,7 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
 
     result = login_service.check_qr_code_scan(qr_code_id)
 
-    if result[:success] && result[:event_type] == Zalo::QRCallbackEventType::GOT_LOGIN_INFO
+    if result[:success] && result[:event_type] == Zalo::LoginEventType::GOT_LOGIN_INFO
       ActiveRecord::Base.transaction do
         # Create the Zalo channel
         zalo_channel = Channel::Zalo.create!(
@@ -85,7 +72,7 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
           display_name: result[:user_info][:name],
           phone: result[:user_info][:phone],
           avatar_url: result[:user_info][:avatar],
-          cookie_data: login_service.cookie_string,
+          cookie_data: login_service.cookie,
           secret_key: result[:user_info][:secret_key], # Assuming secret_key is included
           status: :enabled,
           api_type: temp_data['api_type'],
@@ -102,7 +89,7 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
         )
 
         # Start WebSocket listener
-        Zalo::WebsocketManagerService.instance.start_listener_for(zalo_channel)
+        Zalo::WebSocketService.start(zalo_channel)
 
         # Clean up temporary data
         login_service.redis.del("zalo_temp_#{qr_code_id}")
@@ -123,39 +110,107 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
   end
 
   def send_message
+    # Kiểm tra tham số đầu vào
+    channel_id = params[:channel_id]
     recipient_id = params[:recipient_id]
     content = params[:content]
-    channel_id = params[:channel_id]
 
-    render json: { error: 'Missing required parameters' }, status: :bad_request and return unless recipient_id.present? && content.present? && channel_id.present?
+    render json: { error: 'Missing required parameters' }, status: :bad_request and return unless channel_id.present? && recipient_id.present? && content.present?
 
+    # Tìm kênh Zalo
     zalo_channel = Channel::Zalo.find_by(id: channel_id)
     render json: { error: 'Channel not found' }, status: :not_found and return unless zalo_channel.present?
     render json: { error: 'You are not authorized to perform this action' }, status: :forbidden and return unless Current.account.id == zalo_channel.account_id
 
-    client_service = Zalo::ClientService.new(zalo_channel)
-    result = client_service.send_text_message(recipient_id, content)
+    # Chuẩn bị dữ liệu yêu cầu cho ClientService
+    request = {
+      conversation_id: recipient_id,
+      content: content,
+      is_group: false # Giả định mặc định là tin nhắn cá nhân, có thể thêm params[:is_group] nếu cần
+    }
+
+    # Gửi tin nhắn qua ClientService
+    client_service = Zalo::ClientService.new
+    result = client_service.send_message(zalo_channel, request)
 
     if result[:success]
-      # Tạo tin nhắn trong Chatwoot
+      # Tìm hoặc tạo conversation
       conversation = find_or_create_conversation(zalo_channel, recipient_id)
 
+      # Lưu tin nhắn
       message = conversation.messages.create!(
         account_id: Current.account.id,
         message_type: :outgoing,
         content: content,
         sender: Current.user,
-        source_id: result[:platform_message_id]
+        source_id: result[:platform_message_id] # Giả định ClientService trả về platform_message_id
       )
 
       render json: {
         success: true,
         message_id: message.id,
-        platform_message_id: result[:platform_message_id]
+        platform_message_id: result[:platform_message_id] || SecureRandom.uuid # Nếu không có, tạo ID tạm
       }
     else
-      render json: result, status: :unprocessable_entity
+      render json: { error: result[:error] }, status: :unprocessable_entity
     end
+  rescue StandardError => e
+    render json: { error: "Error sending message: #{e.message}" }, status: :internal_server_error
+  end
+
+  def upload_attachment
+    # Kiểm tra tham số đầu vào
+    channel_id = params[:channel_id]
+    recipient_id = params[:recipient_id]
+    file = params[:file]
+    content = params[:content] # Nội dung tin nhắn đi kèm file (nếu có)
+
+    render json: { error: 'Missing required parameters' }, status: :bad_request and return unless channel_id.present? && recipient_id.present? && file.present?
+
+    # Tìm kênh Zalo
+    zalo_channel = Channel::Zalo.find_by(id: channel_id)
+    render json: { error: 'Channel not found' }, status: :not_found and return unless zalo_channel.present?
+    render json: { error: 'You are not authorized to perform this action' }, status: :forbidden and return unless Current.account.id == zalo_channel.account_id
+
+    # Chuẩn bị dữ liệu yêu cầu cho ClientService
+    request = {
+      conversation_id: recipient_id,
+      content: content || '', # Nếu không có content, gửi chuỗi rỗng
+      files: [file], # Gửi một mảng chứa file
+      is_group: false # Giả định mặc định là tin nhắn cá nhân
+    }
+
+    # Gửi tin nhắn với file qua ClientService
+    client_service = Zalo::ClientService.new
+    result = client_service.send_message(zalo_channel, request)
+
+    if result[:success]
+      # Tìm hoặc tạo conversation
+      conversation = find_or_create_conversation(zalo_channel, recipient_id)
+
+      # Xác định nội dung tin nhắn dựa trên file đính kèm
+      message_content = content.present? ? content : "Attachment sent"
+
+      # Lưu tin nhắn
+      message = conversation.messages.create!(
+        account_id: Current.account.id,
+        message_type: :outgoing,
+        content: message_content,
+        sender: Current.user,
+        source_id: result[:platform_message_id] # Giả định ClientService trả về platform_message_id
+      )
+
+      render json: {
+        success: true,
+        message_id: message.id,
+        platform_message_id: result[:platform_message_id] || SecureRandom.uuid,
+        attachment_url: result[:attachment_url] # Giả định ClientService trả về URL nếu có
+      }
+    else
+      render json: { error: result[:error] }, status: :unprocessable_entity
+    end
+  rescue StandardError => e
+    render json: { error: "Error uploading attachment: #{e.message}" }, status: :internal_server_error
   end
 
   def websocket_status
@@ -175,46 +230,6 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
     }
   end
 
-  # File attachment upload endpoint
-  def upload_attachment
-    begin
-      # Validate parameters
-      render json: { success: false, message: 'Missing recipient_id parameter' }, status: :bad_request and return unless params[:recipient_id].present?
-      render json: { success: false, message: 'Missing file attachment' }, status: :bad_request and return unless params[:file].present?
-
-      # Fetch the Zalo channel
-      @zalo_channel = ::Channel::Zalo.find(params[:id])
-
-      # Create a temporary file from the uploaded file
-      temp_file = params[:file].tempfile.path
-
-      # Upload the file
-      client_service = Zalo::ClientService.new(@zalo_channel)
-
-      # Determine file type and use appropriate method
-      mime_type = params[:file].content_type
-
-      if mime_type.start_with?('image/')
-        result = client_service.send_image_message(params[:recipient_id], temp_file)
-      else
-        result = client_service.send_file_message(params[:recipient_id], temp_file)
-      end
-
-      if result[:success]
-        render json: {
-          success: true,
-          attachment_id: result[:platform_message_id],
-          file_type: mime_type.start_with?('image/') ? 'image' : 'file'
-        }
-      else
-        render json: { success: false, message: result[:error] }, status: :unprocessable_entity
-      end
-    rescue StandardError => e
-      Rails.logger.error "Error uploading attachment: #{e.message}\n#{e.backtrace.join("\n")}"
-      render json: { success: false, message: "Error: #{e.message}" }, status: :internal_server_error
-    end
-  end
-
   private
 
   def fetch_channel
@@ -231,15 +246,10 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
     inbox = zalo_channel.inbox
 
     # Tìm hoặc tạo contact
-    contact = Current.account.contacts.find_or_initialize_by(
-      identifier: recipient_id
-    )
-
+    contact = Current.account.contacts.find_or_initialize_by(identifier: recipient_id)
     if contact.new_record?
       contact.name = "Zalo User #{recipient_id}"
       contact.save!
-
-      # Liên kết contact với inbox
       ContactInbox.find_or_create_by!(
         contact_id: contact.id,
         inbox_id: inbox.id,
@@ -253,9 +263,8 @@ class Api::V1::Accounts::Zalo::ZaloController < Api::V1::Accounts::BaseControlle
       inbox_id: inbox.id,
       contact_id: contact.id
     )
-
     if conversation.new_record?
-      conversation.status = Conversation.statuses[:open]
+      conversation.status = :open
       conversation.save!
     end
 

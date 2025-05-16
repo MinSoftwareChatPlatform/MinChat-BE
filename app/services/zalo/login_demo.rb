@@ -3,8 +3,8 @@ require 'securerandom'
 require 'json'
 require 'redis'
 require 'logger'
-require_relative 'login_service' # Points to the provided Zalo::LoginService
-require_relative 'login_context' # Points to the provided Zalo::LoginContext
+require_relative 'login_service'
+require_relative 'login_context'
 
 module Zalo
   class QRLoginDemo
@@ -51,6 +51,7 @@ module Zalo
         nil
       end
     end
+
     def demo_check_qr_scan(qr_code_id)
       puts "\n===== DEMO CHECK QR CODE SCAN WITH CALLBACK ====="
       puts "Checking QR code with ID: #{qr_code_id}"
@@ -112,9 +113,6 @@ module Zalo
   end
 end
 
-# ==========================
-# Run the program
-# ==========================
 begin
   demo = Zalo::QRLoginDemo.new
   demo.run_all_demos

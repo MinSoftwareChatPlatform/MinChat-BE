@@ -6,46 +6,16 @@ require 'redis'
 require 'logger'
 
 module Zalo
-  # Định nghĩa các loại sự kiện callback, đồng bộ với LoginQRCallbackEventType trong C#
-  module LoginEventType
-    QR_CODE_GENERATED = :qr_code_generated
-    QR_CODE_EXPIRED = :qr_code_expired
-    QR_CODE_SCANNED = :qr_code_scanned
-    QR_CODE_DECLINED = :qr_code_declined
-    GOT_LOGIN_INFO = :got_login_info
-  end
-
-  # Lớp giả lập LoginContext, tương tự LoginContext trong C#
-  class LoginContext
-    attr_accessor :logging, :cookie_jar, :user_agent
-
-    def initialize
-      @logging = false
-      @cookie_jar = {}
-      @user_agent = nil
-    end
-
-    def log_info(message)
-      @logger&.info("[Zalo::LoginContext] #{message}") if logging
-    end
-
-    def log_error(message)
-      @logger&.error("[Zalo::LoginContext] #{message}") if logging
-    end
-
-    def set_logger(logger)
-      @logger = logger
-    end
-  end
-
   class LoginService
     DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    attr_reader :redis, :imei
 
     def initialize(logger = Logger.new(STDOUT))
       @redis = Redis.new
       @logger = logger
       @imei = SecureRandom.uuid
     end
+
 
     # Tạo mã QR cho đăng nhập Zalo
     def generate_qr_code(callback = nil)
@@ -220,7 +190,7 @@ module Zalo
 
     private
 
-    def make_request(ctx, method, path, hfeaders: {}, body: nil, timeout: 15)
+    def make_request(ctx, method, path, headers: {}, body: nil, timeout: 60)
       cookie_header = ctx.cookie_jar.map { |k, v| "#{k}=#{v}" }.join('; ')
       default_headers = {
         'User-Agent' => ctx.user_agent,
@@ -235,8 +205,8 @@ module Zalo
         headers: full_headers,
         followlocation: true,
         timeout: timeout,
-        ssl_verifypeer: false,
-        ssl_verifyhost: 0
+        ssl_verifypeer: true,
+        ssl_verifyhost: 2
       }
 
       if body

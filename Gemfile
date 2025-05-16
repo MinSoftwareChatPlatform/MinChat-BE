@@ -6,7 +6,7 @@ gem 'httparty'
 gem 'websocket-driver'
 ##-- base gems for rails --##
 gem 'rack-cors', '2.0.0', require: 'rack/cors'
-gem 'rails', '~> 7.0.8.4'
+gem 'rails'
 # Reduces boot times through caching; required in config/boot.rb
 gem 'bootsnap', require: false
 
@@ -67,6 +67,7 @@ gem 'redis'
 gem 'redis-namespace'
 # super fast record imports in bulk
 gem 'activerecord-import'
+gem 'activesupport', '~> 7.0.8.4'
 
 ##--- gems for server & infra configuration ---##
 gem 'dotenv-rails', '>= 3.0.0'

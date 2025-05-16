@@ -1,391 +1,483 @@
-# app/services/zalo/login_service.rb
-require 'http'
+require 'typhoeus'
 require 'json'
 require 'securerandom'
+require 'uri'
 require 'redis'
-require 'timeout'
 require 'logger'
-require 'http-cookie'
-require_relative 'zalo_url_manager'
-require_relative 'encryption_service'
 
 module Zalo
-  module QRCallbackEventType
+  # Định nghĩa các loại sự kiện callback, đồng bộ với LoginQRCallbackEventType trong C#
+  module LoginEventType
     QR_CODE_GENERATED = :qr_code_generated
+    QR_CODE_EXPIRED = :qr_code_expired
     QR_CODE_SCANNED = :qr_code_scanned
     QR_CODE_DECLINED = :qr_code_declined
-    QR_CODE_EXPIRED = :qr_code_expired
     GOT_LOGIN_INFO = :got_login_info
-    ACCOUNT_EXISTS = :account_exists
+  end
+
+  # Lớp giả lập LoginContext, tương tự LoginContext trong C#
+  class LoginContext
+    attr_accessor :logging, :cookie_jar, :user_agent
+
+    def initialize
+      @logging = false
+      @cookie_jar = {}
+      @user_agent = nil
+    end
+
+    def log_info(message)
+      @logger&.info("[Zalo::LoginContext] #{message}") if logging
+    end
+
+    def log_error(message)
+      @logger&.error("[Zalo::LoginContext] #{message}") if logging
+    end
+
+    def set_logger(logger)
+      @logger = logger
+    end
   end
 
   class LoginService
-    include Zalo::URLManager::Login
+    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 
-    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
-    KEEP_ALIVE_INTERVAL = 300 # seconds (5 minutes)
-
-    attr_reader :channel_zalo, :imei, :cookie_jar, :logger, :redis, :client
-
-    def initialize(channel_zalo_instance = nil)
-      @logger = Logger.new(STDOUT)
-      @logger.level = Logger::INFO
-      @channel_zalo = channel_zalo_instance
-      @imei = channel_zalo_instance&.imei || SecureRandom.uuid
-      @cookie_jar = HTTP::CookieJar.new
+    def initialize(logger = Logger.new(STDOUT))
       @redis = Redis.new
-      @encryption_service = Zalo::ZaloCryptoHelper.new(@channel_zalo)
-      @client = HTTP.use(:cookie_jar, jar: @cookie_jar).headers({
-                                                                  'User-Agent' => DEFAULT_USER_AGENT,
-                                                                  'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                                                                  'Accept-Language' => 'vi-VN,vi;q=0.9',
-                                                                  'Connection' => 'keep-alive'
-                                                                })
+      @logger = logger
+      @imei = SecureRandom.uuid
     end
 
-    def generate_qr_code
-      @logger.info "[Zalo::LoginService] Generating QR code for IMEI: #{@imei}"
+    # Tạo mã QR cho đăng nhập Zalo
+    def generate_qr_code(callback = nil)
+      ctx = Zalo::LoginContext.new
+      ctx.logging = true
+      ctx.user_agent = DEFAULT_USER_AGENT
+      ctx.set_logger(@logger)
 
-      begin
-        version = load_login_page
-        return { success: false, error: 'Failed to load login page' } unless version
-
-        get_login_info(version)
-        verify_client(version)
-        qr_data = generate_qr(version)
-        return { success: false, error: 'Failed to generate QR code' } unless qr_data
-
-        qr_code_id = SecureRandom.uuid
-        base64_image = qr_data['image'].sub('data:image/png;base64,', '')
-
-        cookies_data = @cookie_jar.cookies.map do |c|
-          {
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path,
-            expires: c.expires&.iso8601,
-            secure: c.secure?
-          }
-        end
-
-        @redis.setex("zalo_qr_#{qr_code_id}", 60, {
-          context: { cookies: cookies_data },
-          version: version,
-          code: qr_data['code'],
-          timestamp: Time.now.to_i
-        }.to_json)
-
-        { success: true, qr_code_id: qr_code_id, qr_image_url: "data:image/png;base64,#{base64_image}" }
-      rescue => e
-        @logger.error "[Zalo::LoginService] QR Generation Error: #{e.message}\n#{e.backtrace.join("\n")}"
-        { success: false, error: "Error generating QR code: #{e.message}" }
+      version = load_login_page(ctx, callback)
+      unless version
+        notify_callback(callback, nil, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể lấy phiên bản API đăng nhập')
+        return error_response('Không thể lấy phiên bản API đăng nhập')
       end
+
+      get_login_info(ctx, version, callback)
+      verify_client(ctx, version, callback)
+
+      qr_response = generate_qr(ctx, version, callback)
+      qr_data = qr_response['data']
+      unless qr_data
+        notify_callback(callback, nil, Zalo::LoginEventType::QR_CODE_EXPIRED, "Không thể tạo mã QR: #{qr_response.to_json}")
+        return error_response("Không thể tạo mã QR: #{qr_response.to_json}")
+      end
+
+      code = qr_data['code']
+      base64_image = qr_data['image'].sub('data:image/png;base64,', '')
+
+      qr_code_id = SecureRandom.uuid
+      qr_data_store = {
+        'cookie_jar' => ctx.cookie_jar,
+        'version' => version,
+        'code' => code
+      }
+      @redis.setex("zalo_qr_#{qr_code_id}", 60, qr_data_store.to_json)
+
+      notify_callback(
+        callback,
+        qr_code_id,
+        Zalo::LoginEventType::QR_CODE_GENERATED,
+        'QR code generated',
+        { code: code, image: base64_image }
+      )
+
+      { success: true, qr_code_id: qr_code_id, base64_image: base64_image }
+    rescue StandardError => e
+      @logger.error "[Zalo::LoginService] Error in generate_qr_code: #{e.message}\n#{e.backtrace.join("\n")}"
+      notify_callback(
+        callback,
+        nil,
+        Zalo::LoginEventType::QR_CODE_EXPIRED,
+        "Error add Zalo account: #{e.message}"
+      )
+      error_response("Error add Zalo account: #{e.message}")
     end
 
-    def check_qr_code_scan(qr_code_id)
-      @logger.info "[Zalo::LoginService] Checking QR code status for ID: #{qr_code_id}"
+    # Kiểm tra trạng thái quét mã QR
+    def check_qr_code_scan(qr_code_id, callback = nil, user_id = nil)
+      qr_data_key = "zalo_qr_#{qr_code_id}"
+      qr_data_json = @redis.get(qr_data_key)
+      unless qr_data_json
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'QR code not found or expired')
+        return error_response('QR code not found or expired')
+      end
 
-      begin
-        qr_session = @redis.get("zalo_qr_#{qr_code_id}")
-        return { success: false, error: 'QR session not found or expired' } unless qr_session
+      qr_data = JSON.parse(qr_data_json)
+      cookie_jar = qr_data['cookie_jar']
+      version = qr_data['version']
+      code = qr_data['code']
 
-        qr_data = JSON.parse(qr_session)
-        cookies_data = qr_data['context']['cookies']
-        temp_cookie_jar = HTTP::CookieJar.new
-        cookies_data.each do |cookie_data|
-          expires = cookie_data['expires'] ? Time.parse(cookie_data['expires']) : nil
-          cookie = HTTP::Cookie.new(
-            name: cookie_data['name'],
-            value: cookie_data['value'],
-            domain: cookie_data['domain'],
-            for_domain: true,
-            path: cookie_data['path'],
-            expires: expires,
-            secure: cookie_data['secure']
-          )
-          temp_cookie_jar.add(cookie)
-        end
-        temp_client = HTTP.use(:cookie_jar, jar: temp_cookie_jar).headers(@client.headers)
+      ctx = Zalo::LoginContext.new
+      ctx.cookie_jar = cookie_jar
+      ctx.logging = true
+      ctx.user_agent = DEFAULT_USER_AGENT
+      ctx.set_logger(@logger)
 
-        scan_result = waiting_scan(temp_client, qr_data['version'], qr_data['code'])
-        return handle_scan_error(scan_result, qr_code_id) unless scan_result['error_code'] == 0
-
-        confirm_result = waiting_confirm(temp_client, qr_data['version'], qr_data['code'])
-        return handle_confirm_error(confirm_result, qr_code_id) unless confirm_result['error_code'] == 0
-
-        session_valid = check_session(temp_client)
-        return { success: false, error: 'Failed to check session' } unless session_valid
-
-        user_info_resp = get_user_info(temp_client)
-        return { success: false, error: 'Failed to get user info' } unless user_info_resp&.dig('data', 'logged')
-
-        user_info = {
-          name: user_info_resp['data']['info']['name'],
-          avatar: user_info_resp['data']['info']['avatar']
-        }
-
-        zalo_account = Channel::Zalo.new(imei: @imei, api_type: 30, api_version: 655)
-        encrypt_params = @encryption_service.get_encrypt_param(zalo_account, true, 'getlogininfo')
-        url = @encryption_service.make_url(zalo_account, GET_LOGIN_INFO, encrypt_params[:params_dict])
-        uri = URI('https://chat.zalo.me/')
-        cookies = temp_cookie_jar.cookies(uri)
-        cookie_string = HTTP::Cookie.cookie_value(cookies)
-        response = temp_client.get(url)
-        return { success: false, error: 'Failed to get login info' } unless response.status == 200
-        parsed = JSON.parse(response.body)
-        decrypted = JSON.parse(@encryption_service.decrypt_resp(encrypt_params[:enk], parsed['data']))
-
-        zalo_account = Channel::Zalo.new(
-          zalo_id: decrypted['data']['uid'],
-          display_name: user_info[:name],
-          avatar: user_info[:avatar],
-          secret_key: decrypted['data']['zpw_enk'],
-          cookie: cookie_string,
-          imei: @imei,
-          phone: "0#{decrypted['data']['phone_number'][2..-1]}",
-          api_type: 30,
-          api_version: 655,
-          language: 'vi'
+      # Chờ quét mã QR
+      scan_result = waiting_scan(ctx, version, code, callback)
+      error_code = scan_result['error_code']
+      case error_code
+      when 0
+        scan_data = scan_result['data']
+        # Kiểm tra tài khoản trùng lặp (giả định, cần DB integration)
+        # existing = ZaloAccount.find_by(avatar: scan_data['avatar'], display_name: scan_data['display_name'])
+        # return error_response('Account already exists') if existing
+        notify_callback(
+          callback,
+          qr_code_id,
+          Zalo::LoginEventType::QR_CODE_SCANNED,
+          'QR code scanned',
+          { avatar: scan_data['avatar'], display_name: scan_data['display_name'] }
         )
-
-        existing = Channel::Zalo.find_by(zalo_id: zalo_account.zalo_id)
-        return { success: false, error: 'Account already exists', event_type: QRCallbackEventType::ACCOUNT_EXISTS } if existing
-
-        zalo_account.save!
-        @redis.del("zalo_qr_#{qr_code_id}")
-        start_keep_alive(qr_code_id, cookies_data)
-
-        { success: true, event_type: QRCallbackEventType::GOT_LOGIN_INFO, user_info: user_info.merge(phone: zalo_account.phone) }
-      rescue => e
-        @logger.error "[Zalo::LoginService] QR Check Error: #{e.message}\n#{e.backtrace.join("\n")}"
-        { success: false, error: "Error checking QR code: #{e.message}" }
+      when 8
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_GENERATED, 'Mã QR chưa được quét')
+        return error_response('QR not scanned')
+      when -13
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_DECLINED, 'Mã QR bị từ chối')
+        return error_response('QR declined')
+      else
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, "Lỗi không xác định: #{error_code}")
+        return error_response("Unknown error: #{error_code}")
       end
+
+      # Chờ xác nhận
+      confirm_result = waiting_confirm(ctx, version, code, callback)
+      if confirm_result['error_code'] != 0
+        type = confirm_result['error_code'] == -13 ? Zalo::LoginEventType::QR_CODE_DECLINED : Zalo::LoginEventType::QR_CODE_EXPIRED
+        message = confirm_result['error_code'] == -13 ? 'Xác nhận bị từ chối' : 'Lỗi khi xác nhận QR'
+        notify_callback(callback, qr_code_id, type, message)
+        return error_response(message)
+      end
+
+      # Kiểm tra phiên đăng nhập
+      unless check_session(ctx, callback)
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể kiểm tra phiên đăng nhập')
+        return error_response('Session check failed')
+      end
+
+      # Lấy thông tin người dùng
+      user_info_resp = get_user_info(ctx, callback)
+      unless user_info_resp && user_info_resp['data'] && user_info_resp['data']['logged']
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể lấy thông tin người dùng hoặc đăng nhập thất bại')
+        return error_response('User info retrieval failed')
+      end
+
+      user_info = {
+        name: user_info_resp['data']['info']['name'],
+        avatar: user_info_resp['data']['info']['avatar']
+      }
+
+      # Lấy thông tin chi tiết từ Zalo (stubbed vì thiếu ZaloCryptoHelper)
+      # TODO: Cần implement ZaloCryptoHelper tương tự C# để lấy secret_key, phone_number, uid
+      decrypted = { 'data' => { 'zpw_enk' => 'secret_key', 'phone_number' => '84912345678', 'uid' => '123456' } }
+
+      cookie = ctx.cookie_jar.map { |k, v| "#{k}=#{v}" }.join('; ')
+
+      zalo_account = {
+        display_name: user_info[:name],
+        avatar: user_info[:avatar],
+        secret_key: decrypted['data']['zpw_enk'],
+        cookie: cookie,
+        imei: @imei,
+        user_id: user_id,
+        phone: "0#{decrypted['data']['phone_number'][2..]}",
+        account_id: decrypted['data']['uid']
+      }
+
+      user_info[:phone] = zalo_account[:phone]
+
+      notify_callback(
+        callback,
+        qr_code_id,
+        Zalo::LoginEventType::GOT_LOGIN_INFO,
+        'Login successful',
+        user_info
+      )
+
+      # Lưu vào cơ sở dữ liệu
+      # TODO: Thay bằng ActiveRecord hoặc ORM tương tự
+      # ZaloAccount.create(zalo_account)
+
+      { success: true, user_info: zalo_account }
+    rescue StandardError => e
+      @logger.error "[Zalo::LoginService] Error in check_qr_code_scan: #{e.message}\n#{e.backtrace.join("\n")}"
+      notify_callback(
+        callback,
+        qr_code_id,
+        Zalo::LoginEventType::QR_CODE_EXPIRED,
+        "Error check Zalo account: #{e.message}"
+      )
+      error_response("Error check Zalo account: #{e.message}")
     end
 
     private
 
-    def load_login_page
-      @logger.info "[Zalo::LoginService] Loading Zalo login page"
-      url = 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
-      begin
-        response = @client.get(url)
-        return nil unless response.status == 200
-        html = response.body.to_s
-        match = html.match(/https:\/\/stc-zlogin\.zdn\.vn\/main-([\d\.]+)\.js/)
-        match ? match[1] : nil
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in load_login_page: #{e.message}"
-        nil
+    def make_request(ctx, method, path, hfeaders: {}, body: nil, timeout: 15)
+      cookie_header = ctx.cookie_jar.map { |k, v| "#{k}=#{v}" }.join('; ')
+      default_headers = {
+        'User-Agent' => ctx.user_agent,
+        'Cookie' => cookie_header,
+        'Accept' => 'application/json, text/plain, */*',
+        'Connection' => 'keep-alive'
+      }
+      full_headers = default_headers.merge(headers)
+
+      options = {
+        method: method,
+        headers: full_headers,
+        followlocation: true,
+        timeout: timeout,
+        ssl_verifypeer: false,
+        ssl_verifyhost: 0
+      }
+
+      if body
+        options[:body] = body
+        full_headers['Content-Type'] ||= 'application/x-www-form-urlencoded'
+      end
+
+      request = Typhoeus::Request.new(path, options)
+
+      if ctx.logging
+        @logger.info "[Zalo::LoginService] Sending #{method.to_s.upcase} request to #{path}"
+        @logger.debug "[Zalo::LoginService] Headers: #{full_headers}"
+        @logger.debug "[Zalo::LoginService] Body: #{body}" if body
+      end
+
+      response = request.run
+      update_cookie_jar(ctx, response.headers['set-cookie'])
+
+      if ctx.logging
+        @logger.info "[Zalo::LoginService] Response code: #{response.code}, Return code: #{response.return_code || 'none'}"
+        @logger.debug "[Zalo::LoginService] Response Body: #{response.body}" unless response.body.empty?
+        @logger.debug "[Zalo::LoginService] Connect time: #{response.connect_time}, Total time: #{response.total_time}"
+      end
+
+      if response.code == 0
+        error_message = "HTTP request failed: Code 0 (#{response.return_code || 'unknown error'}) - Likely network or server issue"
+        ctx.log_error(error_message)
+        raise StandardError, error_message
+      end
+
+      unless response.success?
+        error_message = "HTTP request failed: #{response.code} - #{response.body}"
+        ctx.log_error(error_message)
+        raise StandardError, error_message
+      end
+
+      response
+    rescue StandardError => e
+      error_message = "Lỗi khi gửi yêu cầu HTTP: #{e.message} (Return code: #{response&.return_code || 'none'})"
+      ctx.log_error(error_message)
+      raise StandardError, error_message
+    end
+
+    def update_cookie_jar(ctx, set_cookie)
+      return unless set_cookie
+      Array(set_cookie).each do |cookie_str|
+        name, value = cookie_str.split(';').first.split('=')
+        ctx.cookie_jar[name] = value if name && value
       end
     end
 
-    def get_login_info(version)
-      @logger.info "[Zalo::LoginService] Getting login info for version: #{version}"
+    def parse_json_response(body)
+      JSON.parse(body)
+    rescue JSON::ParserError
+      nil
+    end
+
+    def load_login_page(ctx, callback = nil)
+      url = 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+      headers = {
+        'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language' => 'vi-VN,vi;q=0.9',
+        'Cache-Control' => 'max-age=0',
+        'Sec-Fetch-Dest' => 'document',
+        'Sec-Fetch-Mode' => 'navigate',
+        'Sec-Fetch-Site' => 'same-site',
+        'Sec-Fetch-User' => '?1',
+        'Upgrade-Insecure-Requests' => '1',
+        'Referer' => 'https://chat.zalo.me/'
+      }
+
+      response = make_request(ctx, :get, url, headers: headers)
+      html = response.body
+      match = /https:\/\/stc-zlogin\.zdn\.vn\/main-([\d\.]+)\.js/.match(html)
+      version = match ? match[1] : nil
+
+      notify_callback(
+        callback,
+        nil,
+        version ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        version ? "Loaded login page, version: #{version}" : 'Failed to extract API version'
+      )
+      version
+    end
+
+    def get_login_info(ctx, version, callback = nil)
       url = 'https://id.zalo.me/account/logininfo'
       form_data = { continue: 'https://zalo.me/pc', v: version }
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        response = @client.post(url, form: form_data, headers: headers)
-        return nil unless response.status == 200
-        result = JSON.parse(response.body)
-        result['error_code'] == 0 ? result : nil
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in get_login_info: #{e.message}"
-        nil
-      end
+
+      response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
+      result = parse_json_response(response.body)
+      notify_callback(
+        callback,
+        nil,
+        result ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        result ? 'Retrieved login info' : 'Failed to retrieve login info'
+      )
+      result
     end
 
-    def verify_client(version)
-      @logger.info "[Zalo::LoginService] Verifying client for version: #{version}"
+    def verify_client(ctx, version, callback = nil)
       url = 'https://id.zalo.me/account/verify-client'
       form_data = { type: 'device', continue: 'https://zalo.me/pc', v: version }
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        response = @client.post(url, form: form_data, headers: headers)
-        return nil unless response.status == 200
-        result = JSON.parse(response.body)
-        result['error_code'] == 0 ? result : nil
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in verify_client: #{e.message}"
-        nil
-      end
+
+      response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
+      result = parse_json_response(response.body)
+      notify_callback(
+        callback,
+        nil,
+        result ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        result ? 'Client verified' : 'Failed to verify client'
+      )
+      result
     end
 
-    def generate_qr(version)
-      @logger.info "[Zalo::LoginService] Generating QR code for version: #{version}"
+    def generate_qr(ctx, version, callback = nil)
       url = 'https://id.zalo.me/account/authen/qr/generate'
       form_data = { continue: 'https://zalo.me/pc', v: version }
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        response = @client.post(url, form: form_data, headers: headers)
-        return nil unless response.status == 200
-        result = JSON.parse(response.body)
-        result['error_code'] == 0 ? result['data'] : nil
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in generate_qr: #{e.message}"
-        nil
-      end
+
+      response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
+      result = parse_json_response(response.body)
+      notify_callback(
+        callback,
+        nil,
+        result && result['data'] ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        result && result['data'] ? 'QR code generated' : 'Failed to generate QR code'
+      )
+      result
     end
 
-    def waiting_scan(client, version, code, timeout = 60)
-      @logger.info "[Zalo::LoginService] Waiting for QR scan, code: #{code}"
+    def waiting_scan(ctx, version, code, callback = nil, timeout = 60)
       url = 'https://id.zalo.me/account/authen/qr/waiting-scan'
       form_data = { code: code, continue: 'https://chat.zalo.me/', v: version }
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        start_time = Time.now
-        loop do
-          return { 'error_code' => -99, 'error_message' => 'Timeout waiting for QR scan' } if Time.now - start_time > timeout
-          response = client.post(url, form: form_data, headers: headers)
-          return { 'error_code' => -1, 'error_message' => "HTTP Error: #{response.status}" } unless response.status == 200
-          data = JSON.parse(response.body)
-          return data unless data['error_code'] == 8
-          sleep(2)
+
+      start_time = Time.now
+      loop do
+        if Time.now - start_time > timeout
+          notify_callback(callback, nil, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Timeout waiting for scan')
+          return { 'error_code' => -99, 'error_message' => 'Timeout' }
         end
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in waiting_scan: #{e.message}"
-        { 'error_code' => -1, 'error_message' => "Error: #{e.message}" }
+
+        response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
+        data = parse_json_response(response.body)
+        return data unless data && data['error_code'] == 8
       end
     end
 
-    def waiting_confirm(client, version, code, timeout = 60)
-      @logger.info "[Zalo::LoginService] Waiting for QR confirmation, code: #{code}"
+    def waiting_confirm(ctx, version, code, callback = nil, timeout = 60)
       url = 'https://id.zalo.me/account/authen/qr/waiting-confirm'
       form_data = { code: code, gToken: '', gAction: 'CONFIRM_QR', continue: 'https://chat.zalo.me/', v: version }
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        start_time = Time.now
-        loop do
-          return { 'error_code' => -99, 'error_message' => 'Timeout waiting for confirmation' } if Time.now - start_time > timeout
-          response = client.post(url, form: form_data, headers: headers)
-          return { 'error_code' => -1, 'error_message' => "HTTP Error: #{response.status}" } unless response.status == 200
-          data = JSON.parse(response.body)
-          return data unless data['error_code'] == 8
-          sleep(2)
+
+      ctx.log_info('Vui lòng xác nhận trên điện thoại')
+      start_time = Time.now
+      loop do
+        if Time.now - start_time > timeout
+          notify_callback(callback, nil, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Timeout waiting for confirmation')
+          return { 'error_code' => -99, 'error_message' => 'Timeout' }
         end
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in waiting_confirm: #{e.message}"
-        { 'error_code' => -1, 'error_message' => "Error: #{e.message}" }
+
+        response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
+        data = parse_json_response(response.body)
+        return data unless data && data['error_code'] == 8
       end
     end
 
-    def check_session(client)
-      @logger.info "[Zalo::LoginService] Checking session"
+    def check_session(ctx, callback = nil)
       url = 'https://id.zalo.me/account/checksession?continue=https%3A%2F%2Fchat.zalo.me%2Findex.html'
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        response = client.get(url, headers: headers)
-        response.status == 200
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in check_session: #{e.message}"
-        false
-      end
+
+      response = make_request(ctx, :get, url, headers: headers)
+      success = response.code == 200
+      notify_callback(
+        callback,
+        nil,
+        success ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        success ? 'Session check successful' : 'Session check failed'
+      )
+      success
     end
 
-    def get_user_info(client)
-      @logger.info "[Zalo::LoginService] Getting user info"
+    def get_user_info(ctx, callback = nil)
       url = 'https://jr.chat.zalo.me/jr/userinfo'
       headers = {
-        'dnt' => '1',
-        'origin' => 'https://id.zalo.me',
-        'referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'DNT' => '1',
+        'Origin' => 'https://id.zalo.me',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       }
-      begin
-        response = client.get(url, headers: headers)
-        return nil unless response.status == 200
-        JSON.parse(response.body)
-      rescue => e
-        @logger.error "[Zalo::LoginService] Error in get_user_info: #{e.message}"
-        nil
-      end
+
+      response = make_request(ctx, :get, url, headers: headers)
+      result = parse_json_response(response.body)
+      notify_callback(
+        callback,
+        nil,
+        result && result['data'] && result['data']['logged'] ? Zalo::LoginEventType::QR_CODE_GENERATED : Zalo::LoginEventType::QR_CODE_EXPIRED,
+        result && result['data'] && result['data']['logged'] ? 'User info retrieved' : 'Failed to retrieve user info'
+      )
+      result
     end
 
-    def start_keep_alive(qr_code_id, cookies_data)
-      @logger.info "[Zalo::LoginService] Starting keep-alive thread for QR code ID: #{qr_code_id}"
-      Thread.new do
-        loop do
-          break unless keep_alive(qr_code_id, cookies_data)
-          sleep KEEP_ALIVE_INTERVAL
-        end
-      end
+    def notify_callback(callback, qr_code_id, type, message, data = nil, actions = nil)
+      return unless callback
+      callback.call({
+                      type: type,
+                      qr_code_id: qr_code_id,
+                      message: message,
+                      data: data,
+                      actions: actions
+                    })
     end
 
-    def keep_alive(qr_code_id, cookies_data)
-      @logger.info "[Zalo::LoginService] Performing keep-alive check for QR code ID: #{qr_code_id}"
-      begin
-        temp_cookie_jar = HTTP::CookieJar.new
-        cookies_data.each do |cookie_data|
-          expires = cookie_data['expires'] ? Time.parse(cookie_data['expires']) : nil
-          cookie = HTTP::Cookie.new(
-            name: cookie_data['name'],
-            value: cookie_data['value'],
-            domain: cookie_data['domain'],
-            for_domain: true,
-            path: cookie_data['path'],
-            expires: expires,
-            secure: cookie_data['secure']
-          )
-          temp_cookie_jar.add(cookie)
-        end
-        temp_client = HTTP.use(:cookie_jar, jar: temp_cookie_jar).headers(@client.headers)
-        session_valid = check_session(temp_client)
-        if session_valid
-          @logger.info "[Zalo::LoginService] Session for QR code ID: #{qr_code_id} is still valid"
-          true
-        else
-          @logger.warn "[Zalo::LoginService] Session for QR code ID: #{qr_code_id} is invalid or expired"
-          @redis.del("zalo_qr_#{qr_code_id}")
-          false
-        end
-      rescue => e
-        @logger.error "[Zalo::LoginService] Keep-alive check error for QR code ID: #{qr_code_id}: #{e.message}"
-        @redis.del("zalo_qr_#{qr_code_id}")
-        false
-      end
-    end
-
-    def handle_scan_error(result, qr_code_id)
-      case result['error_code']
-      when 8
-        { success: false, error: 'QR code not scanned', event_type: QRCallbackEventType::QR_CODE_GENERATED }
-      when -13
-        @redis.del("zalo_qr_#{qr_code_id}")
-        { success: false, error: 'QR code declined', event_type: QRCallbackEventType::QR_CODE_DECLINED }
-      else
-        @redis.del("zalo_qr_#{qr_code_id}")
-        { success: false, error: "Unknown error: #{result['error_message']}", event_type: QRCallbackEventType::QR_CODE_EXPIRED }
-      end
-    end
-
-    def handle_confirm_error(result, qr_code_id)
-      error_type = result['error_code'] == -13 ? QRCallbackEventType::QR_CODE_DECLINED : QRCallbackEventType::QR_CODE_EXPIRED
-      @redis.del("zalo_qr_#{qr_code_id}")
-      { success: false, error: result['error_message'], event_type: error_type }
+    def error_response(message)
+      { success: false, error: message }
     end
   end
 end

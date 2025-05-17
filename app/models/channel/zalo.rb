@@ -3,7 +3,6 @@
 # Table name: channel_zalo
 #
 #  id                 :bigint           not null, primary key
-#  access_token_data  :string
 #  api_type           :integer          default(30)
 #  api_version        :integer          default(655)
 #  avatar_url         :string
@@ -11,12 +10,10 @@
 #  display_name       :string
 #  imei               :string
 #  language           :string           default("vi")
-#  last_activity_at   :datetime
 #  meta               :jsonb
 #  phone              :string
-#  refresh_token_data :string
 #  secret_key         :string
-#  status             :integer          default("pending_qr_scan")
+#  status             :integer
 #  created_at         :datetime         not null
 #  updated_at         :datetime         not null
 #  account_id         :integer          not null
@@ -45,16 +42,6 @@ class Channel::Zalo < ApplicationRecord
 
   # Thiết lập thời gian hết hạn cho QR Code
   QR_CODE_EXPIRY = 60.seconds
-
-  # Kiểm tra xem kênh Zalo có hoạt động hay không
-  def online?
-    enabled? && last_activity_at.present? && last_activity_at > 15.minutes.ago
-  end
-
-  # Cập nhật thời gian hoạt động cuối cùng
-  def update_last_activity
-    update(last_activity_at: Time.current)
-  end
 
   # Khởi tạo WebSocket nếu cần
   def ensure_websocket_connected

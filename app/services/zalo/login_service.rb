@@ -4,10 +4,11 @@ require 'securerandom'
 require 'uri'
 require 'redis'
 require 'logger'
+require 'base64'
+require_relative 'LoginEventType'
 
 module Zalo
   class LoginService
-    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     attr_reader :redis, :imei
 
     def initialize(logger = Logger.new(STDOUT))
@@ -16,12 +17,11 @@ module Zalo
       @imei = SecureRandom.uuid
     end
 
-
     # Tạo mã QR cho đăng nhập Zalo
-    def generate_qr_code(callback = nil)
+    def generate_qr_code(callback = nil, options = { user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36', qr_path: 'qr.png' })
       ctx = Zalo::LoginContext.new
+      ctx.user_agent = options[:user_agent]
       ctx.logging = true
-      ctx.user_agent = DEFAULT_USER_AGENT
       ctx.set_logger(@logger)
 
       version = load_login_page(ctx, callback)
@@ -29,6 +29,7 @@ module Zalo
         notify_callback(callback, nil, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể lấy phiên bản API đăng nhập')
         return error_response('Không thể lấy phiên bản API đăng nhập')
       end
+      @logger.info("[Zalo::LoginService] Phiên bản API đăng nhập: #{version}")
 
       get_login_info(ctx, version, callback)
       verify_client(ctx, version, callback)
@@ -49,7 +50,7 @@ module Zalo
         'version' => version,
         'code' => code
       }
-      @redis.setex("zalo_qr_#{qr_code_id}", 60, qr_data_store.to_json)
+      @redis.setex("zalo_qr_#{qr_code_id}", 100, qr_data_store.to_json)
 
       notify_callback(
         callback,
@@ -58,6 +59,16 @@ module Zalo
         'QR code generated',
         { code: code, image: base64_image }
       )
+
+      # Start timeout for QR code expiration
+      Thread.new do
+        sleep 100 # Wait 100 seconds
+        if @redis.exists("zalo_qr_#{qr_code_id}")
+          @logger.info("[Zalo::LoginService] QR hết hạn, tiến hành lấy mới")
+          notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'QR code expired, generating new one')
+          generate_qr_code(callback, options) # Regenerate QR code
+        end
+      end
 
       { success: true, qr_code_id: qr_code_id, base64_image: base64_image }
     rescue StandardError => e
@@ -71,7 +82,6 @@ module Zalo
       error_response("Error add Zalo account: #{e.message}")
     end
 
-    # Kiểm tra trạng thái quét mã QR
     def check_qr_code_scan(qr_code_id, callback = nil, user_id = nil)
       qr_data_key = "zalo_qr_#{qr_code_id}"
       qr_data_json = @redis.get(qr_data_key)
@@ -88,18 +98,13 @@ module Zalo
       ctx = Zalo::LoginContext.new
       ctx.cookie_jar = cookie_jar
       ctx.logging = true
-      ctx.user_agent = DEFAULT_USER_AGENT
       ctx.set_logger(@logger)
 
-      # Chờ quét mã QR
       scan_result = waiting_scan(ctx, version, code, callback)
       error_code = scan_result['error_code']
       case error_code
       when 0
         scan_data = scan_result['data']
-        # Kiểm tra tài khoản trùng lặp (giả định, cần DB integration)
-        # existing = ZaloAccount.find_by(avatar: scan_data['avatar'], display_name: scan_data['display_name'])
-        # return error_response('Account already exists') if existing
         notify_callback(
           callback,
           qr_code_id,
@@ -111,33 +116,33 @@ module Zalo
         notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_GENERATED, 'Mã QR chưa được quét')
         return error_response('QR not scanned')
       when -13
-        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_DECLINED, 'Mã QR bị từ chối')
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_DECLINED, 'Bạn đã từ chối đăng nhập bằng mã QR')
         return error_response('QR declined')
       else
         notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, "Lỗi không xác định: #{error_code}")
         return error_response("Unknown error: #{error_code}")
       end
 
-      # Chờ xác nhận
       confirm_result = waiting_confirm(ctx, version, code, callback)
       if confirm_result['error_code'] != 0
         type = confirm_result['error_code'] == -13 ? Zalo::LoginEventType::QR_CODE_DECLINED : Zalo::LoginEventType::QR_CODE_EXPIRED
-        message = confirm_result['error_code'] == -13 ? 'Xác nhận bị từ chối' : 'Lỗi khi xác nhận QR'
+        message = confirm_result['error_code'] == -13 ? 'Bạn đã từ chối đăng nhập bằng mã QR' : "Đã có lỗi xảy ra: #{confirm_result.to_json}"
         notify_callback(callback, qr_code_id, type, message)
         return error_response(message)
       end
 
-      # Kiểm tra phiên đăng nhập
       unless check_session(ctx, callback)
         notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể kiểm tra phiên đăng nhập')
         return error_response('Session check failed')
       end
 
-      # Lấy thông tin người dùng
+      @logger.info("[Zalo::LoginService] Login thành công vào tài khoản #{scan_result['data']['display_name']}")
+
+      update_cookie_jar(ctx, scan_result['data']['cookie'])
+
       user_info_resp = get_user_info(ctx, callback)
       unless user_info_resp && user_info_resp['data'] && user_info_resp['data']['logged']
         notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể lấy thông tin người dùng hoặc đăng nhập thất bại')
-        return error_response('User info retrieval failed')
       end
 
       user_info = {
@@ -145,21 +150,48 @@ module Zalo
         avatar: user_info_resp['data']['info']['avatar']
       }
 
-      # Lấy thông tin chi tiết từ Zalo (stubbed vì thiếu ZaloCryptoHelper)
-      # TODO: Cần implement ZaloCryptoHelper tương tự C# để lấy secret_key, phone_number, uid
-      decrypted = { 'data' => { 'zpw_enk' => 'secret_key', 'phone_number' => '84912345678', 'uid' => '123456' } }
-
+      encrypted_result = Zalo::ZaloCryptoHelper.get_encrypt_param(true, "getlogininfo")
+      encrypted_result[:params_dict]['nretry'] = '0' unless encrypted_result[:params_dict].key?('nretry')
       cookie = ctx.cookie_jar.map { |k, v| "#{k}=#{v}" }.join('; ')
+
+      api_url = Zalo::URLManager::Login::GET_LOGIN_INFO
+      full_url = @encryption_service.make_url(api_url, encrypted_result[:params_dict])
+
+      @logger.info "[Zalo::LoginService] URL gọi API: #{full_url}"
+
+      # Make the API request using make_request
+      headers = {
+        'Cookie' => cookie,
+        'Accept' => 'application/json, text/plain, */*',
+        'Content-Type' => 'application/x-www-form-urlencoded'
+      }
+      response = make_request(ctx, :get, full_url, headers: headers)
+
+      # Parse the response
+      parsed_response = parse_json_response(response.body)
+      unless parsed_response
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không thể phân tích phản hồi API')
+        return error_response('Failed to parse API response')
+      end
+      encrypted_data = parsed_response["data"].to_s
+
+      # Decrypt the response
+      decrypted_data = @encryption_service.decrypt_resp(encrypted_result[:enk], encrypted_data)
+      unless decrypted_data["data"]
+        notify_callback(callback, qr_code_id, Zalo::LoginEventType::QR_CODE_EXPIRED, 'Không có dữ liệu trong phản hồi được giải mã')
+        return error_response('No data in decrypted response')
+      end
+      parsed_decrypted = JSON.parse(decrypted_data)
 
       zalo_account = {
         display_name: user_info[:name],
         avatar: user_info[:avatar],
-        secret_key: decrypted['data']['zpw_enk'],
+        secret_key: parsed_decrypted['data']['zpw_enk'],
         cookie: cookie,
         imei: @imei,
         user_id: user_id,
-        phone: "0#{decrypted['data']['phone_number'][2..]}",
-        account_id: decrypted['data']['uid']
+        phone: "0#{parsed_decrypted['data']['phone_number'][2..]}",
+        account_id: parsed_decrypted['data']['uid']
       }
 
       user_info[:phone] = zalo_account[:phone]
@@ -171,10 +203,6 @@ module Zalo
         'Login successful',
         user_info
       )
-
-      # Lưu vào cơ sở dữ liệu
-      # TODO: Thay bằng ActiveRecord hoặc ORM tương tự
-      # ZaloAccount.create(zalo_account)
 
       { success: true, user_info: zalo_account }
     rescue StandardError => e
@@ -267,15 +295,20 @@ module Zalo
     def load_login_page(ctx, callback = nil)
       url = 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
       headers = {
-        'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language' => 'vi-VN,vi;q=0.9',
+        'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language' => 'vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5',
         'Cache-Control' => 'max-age=0',
+        'Priority' => 'u=0, i',
+        'Sec-Ch-Ua' => '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        'Sec-Ch-Ua-Mobile' => '?0',
+        'Sec-Ch-Ua-Platform' => '"Windows"',
         'Sec-Fetch-Dest' => 'document',
         'Sec-Fetch-Mode' => 'navigate',
         'Sec-Fetch-Site' => 'same-site',
         'Sec-Fetch-User' => '?1',
         'Upgrade-Insecure-Requests' => '1',
-        'Referer' => 'https://chat.zalo.me/'
+        'Referer' => 'https://chat.zalo.me/',
+        'Referrer-Policy' => 'strict-origin-when-cross-origin'
       }
 
       response = make_request(ctx, :get, url, headers: headers)
@@ -294,11 +327,20 @@ module Zalo
 
     def get_login_info(ctx, version, callback = nil)
       url = 'https://id.zalo.me/account/logininfo'
-      form_data = { continue: 'https://zalo.me/pc', v: version }
+      form_data = { continue: 'https://chat.zalo.me/', v: version }
       headers = {
-        'DNT' => '1',
-        'Origin' => 'https://id.zalo.me',
-        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'Accept' => '*/*',
+        'Accept-Language' => 'vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5',
+        'Content-Type' => 'application/x-www-form-urlencoded',
+        'Priority' => 'u=1, i',
+        'Sec-Ch-Ua' => '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        'Sec-Ch-Ua-Mobile' => '?0',
+        'Sec-Ch-Ua-Platform' => '"Windows"',
+        'Sec-Fetch-Dest' => 'empty',
+        'Sec-Fetch-Mode' => 'cors',
+        'Sec-Fetch-Site' => 'same-origin',
+        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F',
+        'Referrer-Policy' => 'strict-origin-when-cross-origin'
       }
 
       response = make_request(ctx, :post, url, headers: headers, body: URI.encode_www_form(form_data))
@@ -376,7 +418,13 @@ module Zalo
 
     def waiting_confirm(ctx, version, code, callback = nil, timeout = 60)
       url = 'https://id.zalo.me/account/authen/qr/waiting-confirm'
-      form_data = { code: code, gToken: '', gAction: 'CONFIRM_QR', continue: 'https://chat.zalo.me/', v: version }
+      form_data = {
+        code: code,
+        gToken: '',
+        gAction: 'CONFIRM_QR',
+        continue: 'https://chat.zalo.me/',
+        v: version
+      }
       headers = {
         'DNT' => '1',
         'Origin' => 'https://id.zalo.me',
@@ -419,9 +467,18 @@ module Zalo
     def get_user_info(ctx, callback = nil)
       url = 'https://jr.chat.zalo.me/jr/userinfo'
       headers = {
-        'DNT' => '1',
-        'Origin' => 'https://id.zalo.me',
-        'Referer' => 'https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me%2F'
+        'Accept' => '*/*',
+        'Accept-Language' => 'vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5',
+        'Content-Type' => 'application/x-www-form-urlencoded',
+        'Priority' => 'u=1, i',
+        'Sec-Ch-Ua' => '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        'Sec-Ch-Ua-Mobile' => '?0',
+        'Sec-Ch-Ua-Platform' => '"Windows"',
+        'Sec-Fetch-Dest' => 'empty',
+        'Sec-Fetch-Mode' => 'cors',
+        'Sec-Fetch-Site' => 'same-origin',
+        'Referer' => 'https://chat.zalo.me/',
+        'Referrer-Policy' => 'strict-origin-when-cross-origin'
       }
 
       response = make_request(ctx, :get, url, headers: headers)
